@@ -1,0 +1,23 @@
+.DS_Store
+Thumbs.db
+
+node_modules/
+dist/
+build/
+coverage/
+
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# Extension packaging
+*.zip
