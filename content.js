@@ -9,6 +9,8 @@ let settings = { ...DEFAULTS };
 let root = null;
 let observer = null;
 let updateTimer = null;
+let suppressObserver = false;
+let currentState = makeChatState(getChatId());
 
 bootstrap().catch((error) => {
   console.error('[GPTPulse][content] bootstrap failed', error);
@@ -36,7 +38,11 @@ async function bootstrap() {
     scheduleUpdate();
   });
 
-  observer = new MutationObserver(() => scheduleUpdate());
+  observer = new MutationObserver(() => {
+    if (suppressObserver) return;
+    scheduleUpdate();
+  });
+
   observer.observe(document.documentElement || document.body, {
     childList: true,
     subtree: true,
@@ -44,10 +50,12 @@ async function bootstrap() {
   });
 
   window.addEventListener('popstate', () => {
+    resetChatState();
     scheduleUpdate();
   });
 
   window.addEventListener('hashchange', () => {
+    resetChatState();
     scheduleUpdate();
   });
 
@@ -56,6 +64,26 @@ async function bootstrap() {
   });
 
   scheduleUpdate();
+}
+
+function makeChatState(chatId) {
+  return {
+    chatId,
+    stashed: []
+  };
+}
+
+function resetChatState() {
+  const chatId = getChatId();
+  currentState = makeChatState(chatId);
+}
+
+function ensureCurrentState() {
+  const chatId = getChatId();
+  if (!currentState || currentState.chatId !== chatId) {
+    currentState = makeChatState(chatId);
+  }
+  return currentState;
 }
 
 function ensureRoot() {
@@ -77,30 +105,105 @@ function scheduleUpdate() {
 
 async function runUpdate() {
   ensureRoot();
+  const state = ensureCurrentState();
 
   if (!settings.overlayVisible) {
+    restoreAllStashed(state);
     root.style.display = 'none';
-    restoreAllMessages();
     return;
   }
 
   root.style.display = '';
 
-  const messages = collectMessages();
-  const totalCount = messages.length;
-  const totalChars = messages.reduce((sum, msg) => sum + msg.charCount, 0);
   const limit = clampInt(settings.maxVisibleMessages, 1, 200, 10);
-  const shownCount = Math.min(totalCount, limit);
-  const hiddenCount = Math.max(0, totalCount - shownCount);
+  const visibleBefore = collectVisibleMessages();
 
-  applyVisibility(messages, limit);
+  applyWindowing(state, visibleBefore, limit);
+
+  const visibleAfter = collectVisibleMessages();
+  const visibleChars = visibleAfter.reduce((sum, msg) => sum + msg.charCount, 0);
+  const hiddenChars = state.stashed.reduce((sum, msg) => sum + msg.charCount, 0);
 
   render({
-    totalCount,
-    shownCount,
-    hiddenCount,
-    totalChars
+    totalCount: visibleAfter.length + state.stashed.length,
+    shownCount: visibleAfter.length,
+    hiddenCount: state.stashed.length,
+    totalChars: visibleChars + hiddenChars
   });
+}
+
+function applyWindowing(state, visibleMessages, limit) {
+  if (visibleMessages.length > limit) {
+    const collapseCount = visibleMessages.length - limit;
+    const toCollapse = visibleMessages.slice(0, collapseCount);
+
+    withDomChanges(() => {
+      for (const message of toCollapse) {
+        state.stashed.push(snapshotMessage(message));
+        message.node.remove();
+      }
+    });
+
+    return;
+  }
+
+  if (visibleMessages.length < limit && state.stashed.length > 0) {
+    const restoreCount = Math.min(limit - visibleMessages.length, state.stashed.length);
+    const toRestore = state.stashed.splice(state.stashed.length - restoreCount, restoreCount);
+    restoreSnapshots(toRestore);
+  }
+}
+
+function restoreAllStashed(state) {
+  if (!state.stashed.length) return;
+  const toRestore = state.stashed.splice(0, state.stashed.length);
+  restoreSnapshots(toRestore);
+}
+
+function restoreSnapshots(entries) {
+  if (!entries.length) return;
+
+  const visibleMessages = collectVisibleMessages();
+  const referenceNode = visibleMessages[0]?.node || null;
+  const parent = referenceNode?.parentNode || findMessageParent();
+
+  if (!parent) return;
+
+  withDomChanges(() => {
+    const range = document.createRange();
+    range.selectNode(parent);
+
+    for (const entry of entries) {
+      const fragment = range.createContextualFragment(entry.html);
+      parent.insertBefore(fragment, referenceNode);
+    }
+  });
+}
+
+function snapshotMessage(message) {
+  return {
+    html: message.node.outerHTML,
+    charCount: message.charCount
+  };
+}
+
+function findMessageParent() {
+  const firstVisible = collectVisibleMessages()[0]?.node;
+  if (firstVisible?.parentNode) return firstVisible.parentNode;
+
+  const main = document.querySelector('main');
+  return main || null;
+}
+
+function withDomChanges(fn) {
+  suppressObserver = true;
+  try {
+    fn();
+  } finally {
+    requestAnimationFrame(() => {
+      suppressObserver = false;
+    });
+  }
 }
 
 function render({ totalCount, shownCount, hiddenCount, totalChars }) {
@@ -150,85 +253,33 @@ function render({ totalCount, shownCount, hiddenCount, totalChars }) {
   });
 }
 
-function collectMessages() {
-  const nodes = Array.from(document.querySelectorAll('main [data-message-author-role], [data-message-author-role]'));
-  const uniqueNodes = [];
-  const seenNodes = new Set();
-
-  for (const node of nodes) {
-    if (!(node instanceof HTMLElement)) continue;
-    if (seenNodes.has(node)) continue;
-    seenNodes.add(node);
-    uniqueNodes.push(node);
-  }
-
+function collectVisibleMessages() {
+  const candidates = Array.from(document.querySelectorAll('main [data-message-author-role], [data-message-author-role]'));
+  const seenContainers = new Set();
   const messages = [];
-  const seenSignatures = new Set();
 
-  for (const node of uniqueNodes) {
-    const role = node.getAttribute('data-message-author-role') || 'unknown';
-    const rawText = normalizeText(node.innerText || node.textContent || '');
-    if (!rawText) continue;
+  for (const node of candidates) {
+    if (!(node instanceof HTMLElement)) continue;
+    if (root && (node === root || root.contains(node))) continue;
 
-    const signature = hashString(`${role}\u241f${rawText}`);
-    if (seenSignatures.has(signature)) continue;
-    seenSignatures.add(signature);
+    const container = node.closest('article') || node;
+    if (!(container instanceof HTMLElement)) continue;
+    if (!container.isConnected) continue;
+    if (root && (container === root || root.contains(container))) continue;
+    if (seenContainers.has(container)) continue;
+
+    const text = normalizeText(container.innerText || container.textContent || '');
+    if (!text) continue;
+
+    seenContainers.add(container);
 
     messages.push({
-      node,
-      role,
-      text: rawText,
-      charCount: rawText.length,
-      signature,
-      capturedAt: new Date().toISOString()
+      node: container,
+      charCount: text.length
     });
   }
 
   return messages;
-}
-
-function applyVisibility(messages, limit) {
-  const cutoff = Math.max(0, messages.length - limit);
-
-  for (let i = 0; i < messages.length; i++) {
-    const node = messages[i].node;
-    if (!(node instanceof HTMLElement)) continue;
-
-    if (i < cutoff) {
-      if (!node.dataset.gptpulsePrevDisplay) {
-        node.dataset.gptpulsePrevDisplay = node.style.display || '';
-      }
-      node.style.display = 'none';
-      node.setAttribute('data-gptpulse-hidden', '1');
-    } else {
-      restoreMessage(node);
-    }
-  }
-}
-
-function restoreMessage(node) {
-  if (!(node instanceof HTMLElement)) return;
-
-  if (node.dataset.gptpulsePrevDisplay !== undefined) {
-    const prev = node.dataset.gptpulsePrevDisplay;
-    if (prev) {
-      node.style.display = prev;
-    } else {
-      node.style.removeProperty('display');
-    }
-    delete node.dataset.gptpulsePrevDisplay;
-  } else if (node.style.display === 'none') {
-    node.style.removeProperty('display');
-  }
-
-  node.removeAttribute('data-gptpulse-hidden');
-}
-
-function restoreAllMessages() {
-  const hidden = document.querySelectorAll('[data-gptpulse-hidden="1"], [data-message-author-role]');
-  for (const node of hidden) {
-    restoreMessage(node);
-  }
 }
 
 function normalizeText(text) {
@@ -239,6 +290,12 @@ function normalizeText(text) {
     .replace(/\n{3,}/g, '\n\n')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
+}
+
+function getChatId() {
+  const match = location.pathname.match(/\/c\/([^/?#]+)/);
+  if (match?.[1]) return match[1];
+  return location.pathname || 'temporary-chat';
 }
 
 function formatCompact(num) {
@@ -255,20 +312,4 @@ function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(String(value), 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, n));
-}
-
-function hashString(input) {
-  let h1 = 0xdeadbeef;
-  let h2 = 0x41c6ce57;
-
-  for (let i = 0; i < input.length; i++) {
-    const ch = input.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-
-  return `${(h2 >>> 0).toString(16)}${(h1 >>> 0).toString(16)}`;
 }
