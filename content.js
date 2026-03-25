@@ -2,17 +2,13 @@ const ROOT_ID = 'gptpulse-root';
 
 const DEFAULTS = {
   overlayVisible: true,
-  loggingEnabled: false,
-  maxVisibleMessages: 10,
-  folderConfigured: false,
-  folderName: ''
+  maxVisibleMessages: 10
 };
 
 let settings = { ...DEFAULTS };
 let root = null;
 let observer = null;
 let updateTimer = null;
-const pageSeen = new Map();
 
 bootstrap().catch((error) => {
   console.error('[GPTPulse][content] bootstrap failed', error);
@@ -28,15 +24,16 @@ async function bootstrap() {
     shownCount: 0,
     hiddenCount: 0,
     totalChars: 0,
-    chatId: getChatId(),
-    loggingStateText: getLoggingStateText()
+    chatId: getChatId()
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
+
     for (const [key, { newValue }] of Object.entries(changes)) {
       settings[key] = newValue;
     }
+
     scheduleUpdate();
   });
 
@@ -48,12 +45,10 @@ async function bootstrap() {
   });
 
   window.addEventListener('popstate', () => {
-    pageSeen.clear();
     scheduleUpdate();
   });
 
   window.addEventListener('hashchange', () => {
-    pageSeen.clear();
     scheduleUpdate();
   });
 
@@ -99,7 +94,6 @@ async function runUpdate() {
   const shownCount = Math.min(totalCount, limit);
   const hiddenCount = Math.max(0, totalCount - shownCount);
   const chatId = getChatId();
-  const chatTitle = getChatTitle();
 
   applyVisibility(messages, limit);
 
@@ -108,54 +102,11 @@ async function runUpdate() {
     shownCount,
     hiddenCount,
     totalChars,
-    chatId,
-    loggingStateText: getLoggingStateText()
+    chatId
   });
-
-  if (!settings.loggingEnabled || !settings.folderConfigured || messages.length === 0) {
-    return;
-  }
-
-  const seenKey = chatId || 'unknown-chat';
-  const seen = pageSeen.get(seenKey) || new Set();
-
-  const newEntries = [];
-  for (const msg of messages) {
-    if (seen.has(msg.signature)) continue;
-    seen.add(msg.signature);
-    newEntries.push({
-      role: msg.role,
-      text: msg.text,
-      charCount: msg.charCount,
-      signature: msg.signature,
-      capturedAt: msg.capturedAt
-    });
-  }
-
-  pageSeen.set(seenKey, seen);
-
-  if (newEntries.length === 0) return;
-
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: 'appendLogs',
-      payload: {
-        chatId,
-        chatTitle,
-        url: location.href,
-        entries: newEntries
-      }
-    });
-
-    if (!response?.ok && response?.error) {
-      console.warn('[GPTPulse] appendLogs failed:', response.error);
-    }
-  } catch (error) {
-    console.warn('[GPTPulse] appendLogs exception:', error);
-  }
 }
 
-function render({ totalCount, shownCount, hiddenCount, totalChars, chatId, loggingStateText }) {
+function render({ totalCount, shownCount, hiddenCount, totalChars, chatId }) {
   const sliderValue = clampInt(settings.maxVisibleMessages, 1, 200, 10);
 
   root.innerHTML = `
@@ -176,10 +127,6 @@ function render({ totalCount, shownCount, hiddenCount, totalChars, chatId, loggi
           <span class="gptpulse-label">Chars</span>
           <span class="gptpulse-value">${formatCompact(totalChars)}</span>
         </div>
-        <div class="gptpulse-row">
-          <span class="gptpulse-label">Logging</span>
-          <span class="gptpulse-value">${escapeHtml(loggingStateText)}</span>
-        </div>
         <div class="gptpulse-slider-wrap">
           <div class="gptpulse-slider-head">
             <span class="gptpulse-label">Visible messages</span>
@@ -188,9 +135,6 @@ function render({ totalCount, shownCount, hiddenCount, totalChars, chatId, loggi
           <input class="gptpulse-slider" id="gptpulse-slider" type="range" min="1" max="200" step="1" value="${sliderValue}">
         </div>
         <div class="gptpulse-footer">
-          <button class="gptpulse-btn" id="gptpulse-toggle-log" type="button">
-            ${settings.loggingEnabled ? 'Logging On' : 'Logging Off'}
-          </button>
           <button class="gptpulse-btn" id="gptpulse-open-options" type="button">
             Options
           </button>
@@ -202,15 +146,9 @@ function render({ totalCount, shownCount, hiddenCount, totalChars, chatId, loggi
     </div>
   `;
 
-  const toggleBtn = root.querySelector('#gptpulse-toggle-log');
   const optionsBtn = root.querySelector('#gptpulse-open-options');
   const slider = root.querySelector('#gptpulse-slider');
   const sliderValueEl = root.querySelector('#gptpulse-slider-value');
-
-  toggleBtn?.addEventListener('click', async () => {
-    const next = !settings.loggingEnabled;
-    await chrome.storage.local.set({ loggingEnabled: next });
-  });
 
   optionsBtn?.addEventListener('click', async () => {
     await chrome.runtime.sendMessage({ type: 'openOptions' });
@@ -286,6 +224,7 @@ function applyVisibility(messages, limit) {
 
 function restoreMessage(node) {
   if (!(node instanceof HTMLElement)) return;
+
   if (node.dataset.gptpulsePrevDisplay !== undefined) {
     const prev = node.dataset.gptpulsePrevDisplay;
     if (prev) {
@@ -297,6 +236,7 @@ function restoreMessage(node) {
   } else if (node.style.display === 'none') {
     node.style.removeProperty('display');
   }
+
   node.removeAttribute('data-gptpulse-hidden');
 }
 
@@ -305,12 +245,6 @@ function restoreAllMessages() {
   for (const node of hidden) {
     restoreMessage(node);
   }
-}
-
-function getLoggingStateText() {
-  if (!settings.loggingEnabled) return 'Off';
-  if (!settings.folderConfigured) return 'No folder';
-  return `On · ${settings.folderName || 'folder set'}`;
 }
 
 function getChatId() {

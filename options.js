@@ -1,9 +1,6 @@
 const DEFAULTS = {
   overlayVisible: true,
-  loggingEnabled: false,
-  maxVisibleMessages: 10,
-  folderConfigured: false,
-  folderName: ''
+  maxVisibleMessages: 10
 };
 
 const els = {
@@ -11,9 +8,7 @@ const els = {
   maxVisibleNumber: document.getElementById('maxVisibleNumber'),
   maxVisibleValue: document.getElementById('maxVisibleValue'),
   overlayVisible: document.getElementById('overlayVisible'),
-  loggingEnabled: document.getElementById('loggingEnabled'),
   saveSettings: document.getElementById('saveSettings'),
-  folderInfo: document.getElementById('folderInfo'),
   status: document.getElementById('status')
 };
 
@@ -32,16 +27,11 @@ async function init() {
   els.maxVisibleNumber.value = visible;
   els.maxVisibleValue.textContent = String(visible);
   els.overlayVisible.checked = !!settings.overlayVisible;
-  els.loggingEnabled.checked = !!settings.loggingEnabled;
-  els.folderInfo.textContent = settings.folderConfigured
-    ? `Stored folder: ${settings.folderName || 'folder set'}`
-    : 'Custom folder picker disabled in extension only mode.';
 
   els.maxVisibleMessages.addEventListener('input', syncFromRange);
   els.maxVisibleNumber.addEventListener('input', syncFromNumber);
   els.saveSettings.addEventListener('click', saveSettings);
   els.overlayVisible.addEventListener('change', saveQuickToggles);
-  els.loggingEnabled.addEventListener('change', saveQuickToggles);
 }
 
 function syncFromRange() {
@@ -58,11 +48,10 @@ function syncFromNumber() {
 
 async function saveQuickToggles() {
   await chrome.storage.local.set({
-    overlayVisible: els.overlayVisible.checked,
-    loggingEnabled: els.loggingEnabled.checked
+    overlayVisible: els.overlayVisible.checked
   });
 
-  setStatus('Overlay and logging toggles saved.');
+  setStatus('Overlay setting saved.');
 }
 
 async function saveSettings() {
@@ -70,8 +59,7 @@ async function saveSettings() {
 
   await chrome.storage.local.set({
     maxVisibleMessages,
-    overlayVisible: els.overlayVisible.checked,
-    loggingEnabled: els.loggingEnabled.checked
+    overlayVisible: els.overlayVisible.checked
   });
 
   els.maxVisibleMessages.value = maxVisibleMessages;

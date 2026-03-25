@@ -114,12 +114,6 @@
       line-height: 1.5;
     }
 
-    .folder {
-      word-break: break-word;
-      font-size: 13px;
-      color: rgba(255,255,255,0.9);
-    }
-
     .switch {
       display: inline-flex;
       align-items: center;
@@ -150,7 +144,7 @@
 <body>
   <div class="wrap">
     <h1>GPTPulse</h1>
-    <div class="muted">Show only the last N messages in ChatGPT and optionally log chats locally.</div>
+    <div class="muted">Show only the last N messages in ChatGPT.</div>
 
     <div class="grid">
       <section class="card">
@@ -176,7 +170,7 @@
       </section>
 
       <section class="card">
-        <h2>Overlay and logging</h2>
+        <h2>Overlay</h2>
 
         <div class="row">
           <label class="switch">
@@ -185,29 +179,8 @@
           </label>
         </div>
 
-        <div class="row">
-          <label class="switch">
-            <input id="loggingEnabled" type="checkbox">
-            <span>Enable local logging</span>
-          </label>
-        </div>
-
         <div class="small">
-          The broken folder picker was removed from the overlay.
-        </div>
-      </section>
-
-      <section class="card">
-        <h2>Log destination</h2>
-
-        <div class="folder" id="folderInfo">Custom folder picker disabled in extension only mode.</div>
-
-        <div class="small" style="margin-top: 12px;">
-          Clean options now are:
-          <br><br>
-          1. logs inside a subfolder of your Downloads directory
-          <br>
-          2. a tiny native helper for a truly free folder path
+          Logging support was removed to keep GPTPulse focused and simple.
         </div>
       </section>
     </div>
