@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "GPTPulse",
-  "version": "0.1.1",
-  "description": "Show only the last N messages in ChatGPT and optionally log chats locally.",
+  "version": "0.1.2",
+  "description": "Show only the last N messages in ChatGPT and keep the live DOM smaller.",
   "minimum_chrome_version": "122",
   "permissions": [
     "storage"
@@ -43,7 +43,7 @@
       "css": [
         "content.css"
       ],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ]
 }

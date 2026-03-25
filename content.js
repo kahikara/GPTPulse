@@ -10,13 +10,18 @@ let root = null;
 let observer = null;
 let updateTimer = null;
 let suppressObserver = false;
+let pendingRevealTimer = null;
 let currentState = makeChatState(getChatId());
 
 bootstrap().catch((error) => {
   console.error('[GPTPulse][content] bootstrap failed', error);
+  markTrimReady();
 });
 
 async function bootstrap() {
+  patchHistory();
+  markTrimPending();
+
   const stored = await chrome.storage.local.get(Object.keys(DEFAULTS));
   settings = { ...DEFAULTS, ...stored };
 
@@ -35,35 +40,60 @@ async function bootstrap() {
       settings[key] = newValue;
     }
 
-    scheduleUpdate();
+    scheduleUpdate(0);
   });
 
   observer = new MutationObserver(() => {
     if (suppressObserver) return;
-    scheduleUpdate();
+    scheduleUpdate(0);
   });
 
-  observer.observe(document.documentElement || document.body, {
+  observer.observe(document.documentElement, {
     childList: true,
     subtree: true,
     characterData: true
   });
 
-  window.addEventListener('popstate', () => {
-    resetChatState();
-    scheduleUpdate();
-  });
-
-  window.addEventListener('hashchange', () => {
-    resetChatState();
-    scheduleUpdate();
-  });
+  window.addEventListener('gptpulse:navigation', handleNavigation, true);
+  window.addEventListener('popstate', handleNavigation, true);
+  window.addEventListener('hashchange', handleNavigation, true);
 
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) scheduleUpdate();
+    if (!document.hidden) scheduleUpdate(0);
   });
 
-  scheduleUpdate();
+  scheduleUpdate(0);
+}
+
+function patchHistory() {
+  if (window.__gptpulseHistoryPatched) return;
+  window.__gptpulseHistoryPatched = true;
+
+  const wrap = (name) => {
+    const original = history[name];
+    if (typeof original !== 'function') return;
+
+    history[name] = function (...args) {
+      const result = original.apply(this, args);
+      window.dispatchEvent(new Event('gptpulse:navigation'));
+      return result;
+    };
+  };
+
+  wrap('pushState');
+  wrap('replaceState');
+}
+
+function handleNavigation() {
+  const chatId = getChatId();
+  if (!currentState || currentState.chatId !== chatId) {
+    currentState = makeChatState(chatId);
+  } else {
+    currentState.stashed = [];
+  }
+
+  markTrimPending();
+  scheduleUpdate(0);
 }
 
 function makeChatState(chatId) {
@@ -73,17 +103,26 @@ function makeChatState(chatId) {
   };
 }
 
-function resetChatState() {
-  const chatId = getChatId();
-  currentState = makeChatState(chatId);
-}
-
 function ensureCurrentState() {
   const chatId = getChatId();
   if (!currentState || currentState.chatId !== chatId) {
     currentState = makeChatState(chatId);
   }
   return currentState;
+}
+
+function markTrimPending() {
+  document.documentElement.classList.add('gptpulse-trim-pending');
+
+  clearTimeout(pendingRevealTimer);
+  pendingRevealTimer = setTimeout(() => {
+    markTrimReady();
+  }, 2500);
+}
+
+function markTrimReady() {
+  clearTimeout(pendingRevealTimer);
+  document.documentElement.classList.remove('gptpulse-trim-pending');
 }
 
 function ensureRoot() {
@@ -98,9 +137,9 @@ function ensureRoot() {
   document.documentElement.appendChild(root);
 }
 
-function scheduleUpdate() {
+function scheduleUpdate(delay = 80) {
   clearTimeout(updateTimer);
-  updateTimer = setTimeout(runUpdate, 250);
+  updateTimer = setTimeout(runUpdate, delay);
 }
 
 async function runUpdate() {
@@ -110,6 +149,7 @@ async function runUpdate() {
   if (!settings.overlayVisible) {
     restoreAllStashed(state);
     root.style.display = 'none';
+    markTrimReady();
     return;
   }
 
@@ -118,18 +158,29 @@ async function runUpdate() {
   const limit = clampInt(settings.maxVisibleMessages, 1, 200, 10);
   const visibleBefore = collectVisibleMessages();
 
+  if (visibleBefore.length === 0) {
+    render({
+      totalCount: state.stashed.length,
+      shownCount: 0,
+      hiddenCount: state.stashed.length,
+      totalChars: sumChars(state.stashed)
+    });
+    return;
+  }
+
   applyWindowing(state, visibleBefore, limit);
 
   const visibleAfter = collectVisibleMessages();
-  const visibleChars = visibleAfter.reduce((sum, msg) => sum + msg.charCount, 0);
-  const hiddenChars = state.stashed.reduce((sum, msg) => sum + msg.charCount, 0);
+  const totalChars = sumChars(visibleAfter) + sumChars(state.stashed);
 
   render({
     totalCount: visibleAfter.length + state.stashed.length,
     shownCount: visibleAfter.length,
     hiddenCount: state.stashed.length,
-    totalChars: visibleChars + hiddenChars
+    totalChars
   });
+
+  markTrimReady();
 }
 
 function applyWindowing(state, visibleMessages, limit) {
@@ -272,7 +323,6 @@ function collectVisibleMessages() {
     if (!text) continue;
 
     seenContainers.add(container);
-
     messages.push({
       node: container,
       charCount: text.length
@@ -296,6 +346,10 @@ function getChatId() {
   const match = location.pathname.match(/\/c\/([^/?#]+)/);
   if (match?.[1]) return match[1];
   return location.pathname || 'temporary-chat';
+}
+
+function sumChars(items) {
+  return items.reduce((sum, item) => sum + (item.charCount || 0), 0);
 }
 
 function formatCompact(num) {

@@ -1,3 +1,7 @@
+html.gptpulse-trim-pending main {
+  visibility: hidden !important;
+}
+
 #gptpulse-root {
   position: fixed;
   top: 14px;
