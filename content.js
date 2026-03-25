@@ -23,8 +23,7 @@ async function bootstrap() {
     totalCount: 0,
     shownCount: 0,
     hiddenCount: 0,
-    totalChars: 0,
-    chatId: getChatId()
+    totalChars: 0
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -93,7 +92,6 @@ async function runUpdate() {
   const limit = clampInt(settings.maxVisibleMessages, 1, 200, 10);
   const shownCount = Math.min(totalCount, limit);
   const hiddenCount = Math.max(0, totalCount - shownCount);
-  const chatId = getChatId();
 
   applyVisibility(messages, limit);
 
@@ -101,12 +99,11 @@ async function runUpdate() {
     totalCount,
     shownCount,
     hiddenCount,
-    totalChars,
-    chatId
+    totalChars
   });
 }
 
-function render({ totalCount, shownCount, hiddenCount, totalChars, chatId }) {
+function render({ totalCount, shownCount, hiddenCount, totalChars }) {
   const sliderValue = clampInt(settings.maxVisibleMessages, 1, 200, 10);
 
   root.innerHTML = `
@@ -134,25 +131,12 @@ function render({ totalCount, shownCount, hiddenCount, totalChars, chatId }) {
           </div>
           <input class="gptpulse-slider" id="gptpulse-slider" type="range" min="1" max="200" step="1" value="${sliderValue}">
         </div>
-        <div class="gptpulse-footer">
-          <button class="gptpulse-btn" id="gptpulse-open-options" type="button">
-            Options
-          </button>
-        </div>
-        <div class="gptpulse-muted">
-          Chat: ${escapeHtml(shorten(chatId, 26))}
-        </div>
       </div>
     </div>
   `;
 
-  const optionsBtn = root.querySelector('#gptpulse-open-options');
   const slider = root.querySelector('#gptpulse-slider');
   const sliderValueEl = root.querySelector('#gptpulse-slider-value');
-
-  optionsBtn?.addEventListener('click', async () => {
-    await chrome.runtime.sendMessage({ type: 'openOptions' });
-  });
 
   slider?.addEventListener('input', () => {
     if (sliderValueEl) {
@@ -247,28 +231,6 @@ function restoreAllMessages() {
   }
 }
 
-function getChatId() {
-  const match = location.pathname.match(/\/c\/([^/?#]+)/);
-  if (match?.[1]) return match[1];
-
-  const title = getChatTitle();
-  if (title) return `temp_${title}`;
-  return 'temporary-chat';
-}
-
-function getChatTitle() {
-  const title =
-    document.querySelector('main h1')?.textContent?.trim() ||
-    document.title?.replace(/\s+\|\s+ChatGPT.*$/i, '').trim() ||
-    'Untitled Chat';
-
-  return sanitizeSmall(title);
-}
-
-function sanitizeSmall(input) {
-  return String(input).replace(/\s+/g, '_').replace(/[^\w.\-]+/g, '_').slice(0, 80);
-}
-
 function normalizeText(text) {
   return String(text)
     .replace(/\u00A0/g, ' ')
@@ -287,21 +249,6 @@ function formatCompact(num) {
 
 function formatNumber(num) {
   return new Intl.NumberFormat().format(Number(num) || 0);
-}
-
-function shorten(input, max) {
-  const str = String(input || '');
-  if (str.length <= max) return str;
-  return `${str.slice(0, max - 1)}…`;
-}
-
-function escapeHtml(input) {
-  return String(input)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
 }
 
 function clampInt(value, min, max, fallback) {

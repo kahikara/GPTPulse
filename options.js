@@ -8,7 +8,6 @@ const els = {
   maxVisibleNumber: document.getElementById('maxVisibleNumber'),
   maxVisibleValue: document.getElementById('maxVisibleValue'),
   overlayVisible: document.getElementById('overlayVisible'),
-  saveSettings: document.getElementById('saveSettings'),
   status: document.getElementById('status')
 };
 
@@ -20,58 +19,69 @@ init().catch((error) => {
 async function init() {
   const stored = await chrome.storage.local.get(Object.keys(DEFAULTS));
   const settings = { ...DEFAULTS, ...stored };
+  applySettingsToUi(settings);
 
-  const visible = clampInt(settings.maxVisibleMessages, 1, 200, 10);
+  els.maxVisibleMessages.addEventListener('input', () => {
+    const value = clampInt(els.maxVisibleMessages.value, 1, 200, 10);
+    updateVisibleControls(value);
+  });
 
-  els.maxVisibleMessages.value = visible;
-  els.maxVisibleNumber.value = visible;
-  els.maxVisibleValue.textContent = String(visible);
-  els.overlayVisible.checked = !!settings.overlayVisible;
+  els.maxVisibleMessages.addEventListener('change', async () => {
+    await saveCurrentSettings();
+  });
 
-  els.maxVisibleMessages.addEventListener('input', syncFromRange);
-  els.maxVisibleNumber.addEventListener('input', syncFromNumber);
-  els.saveSettings.addEventListener('click', saveSettings);
-  els.overlayVisible.addEventListener('change', saveQuickToggles);
+  els.maxVisibleNumber.addEventListener('input', () => {
+    const value = clampInt(els.maxVisibleNumber.value, 1, 200, 10);
+    updateVisibleControls(value);
+  });
+
+  els.maxVisibleNumber.addEventListener('change', async () => {
+    const value = clampInt(els.maxVisibleNumber.value, 1, 200, 10);
+    updateVisibleControls(value);
+    await saveCurrentSettings();
+  });
+
+  els.overlayVisible.addEventListener('change', async () => {
+    await saveCurrentSettings();
+  });
 }
 
-function syncFromRange() {
-  const value = clampInt(els.maxVisibleMessages.value, 1, 200, 10);
+function applySettingsToUi(settings) {
+  const value = clampInt(settings.maxVisibleMessages, 1, 200, 10);
+  updateVisibleControls(value);
+  els.overlayVisible.checked = !!settings.overlayVisible;
+}
+
+function updateVisibleControls(value) {
+  els.maxVisibleMessages.value = value;
   els.maxVisibleNumber.value = value;
   els.maxVisibleValue.textContent = String(value);
 }
 
-function syncFromNumber() {
-  const value = clampInt(els.maxVisibleNumber.value, 1, 200, 10);
-  els.maxVisibleMessages.value = value;
-  els.maxVisibleValue.textContent = String(value);
-}
-
-async function saveQuickToggles() {
-  await chrome.storage.local.set({
-    overlayVisible: els.overlayVisible.checked
-  });
-
-  setStatus('Overlay setting saved.');
-}
-
-async function saveSettings() {
+async function saveCurrentSettings() {
   const maxVisibleMessages = clampInt(els.maxVisibleNumber.value, 1, 200, 10);
+  const overlayVisible = !!els.overlayVisible.checked;
 
   await chrome.storage.local.set({
     maxVisibleMessages,
-    overlayVisible: els.overlayVisible.checked
+    overlayVisible
   });
 
-  els.maxVisibleMessages.value = maxVisibleMessages;
-  els.maxVisibleNumber.value = maxVisibleMessages;
-  els.maxVisibleValue.textContent = String(maxVisibleMessages);
-
-  setStatus('Settings saved.');
+  setStatus('Saved');
 }
 
 function setStatus(text, isError = false) {
   els.status.textContent = text;
   els.status.style.color = isError ? '#fca5a5' : 'rgba(255,255,255,0.85)';
+
+  clearTimeout(setStatus._timer);
+  if (!isError && text) {
+    setStatus._timer = setTimeout(() => {
+      if (els.status.textContent === text) {
+        els.status.textContent = '';
+      }
+    }, 1400);
+  }
 }
 
 function clampInt(value, min, max, fallback) {
