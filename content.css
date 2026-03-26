@@ -85,30 +85,17 @@ html.gptpulse-trim-pending main {
   accent-color: #ffffff;
 }
 
-.gptpulse-compact-shell {
-  border: 1px solid rgba(255,255,255,0.06);
-  background: rgba(255,255,255,0.025);
-  border-radius: 14px;
+#gptpulse-archive-summary {
+  margin: 0 0 16px;
   padding: 10px 12px;
-  margin: 8px 0;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  color: rgba(255,255,255,0.82);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.gptpulse-compact-role {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 7px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.06);
-  color: rgba(255,255,255,0.86);
-  font-size: 11px;
-  font-weight: 700;
-  margin-bottom: 8px;
-}
-
-.gptpulse-compact-text {
-  color: rgba(255,255,255,0.86);
-  font-size: 13px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
+#gptpulse-archive-summary strong {
+  color: #fff;
 }

@@ -178,17 +178,17 @@
     <div class="hero">
       <div class="hero-badge">GPTPulse</div>
       <h1>Settings</h1>
-      <p>GPTPulse keeps only the last N messages fully rendered. Older messages are compacted into lightweight text blocks inside the chat to reduce DOM size and render cost.</p>
+      <p>GPTPulse keeps only the configured number of recent messages visible in the chat. Older messages are fully hidden from the DOM and brought back only when you raise the limit again.</p>
     </div>
 
     <div class="panel-grid">
       <section class="panel">
-        <h2>Live messages</h2>
-        <div class="panel-copy">Choose how many recent messages should stay fully rendered. Older messages remain readable, but in a lighter format.</div>
+        <h2>Visible messages</h2>
+        <div class="panel-copy">Choose how many recent messages should stay visible in the chat at the same time.</div>
 
         <div class="limit-preview">
           <div class="limit-preview-value" id="maxVisibleValue">10</div>
-          <div class="limit-preview-label">fully rendered</div>
+          <div class="limit-preview-label">visible now</div>
         </div>
 
         <div class="range-stack">
@@ -208,7 +208,7 @@
 
       <section class="panel">
         <h2>Overlay</h2>
-        <div class="panel-copy">The compact overlay in the top right shows how many messages are still fully live and how many were compacted.</div>
+        <div class="panel-copy">The overlay shows total messages, currently visible messages, hidden messages, and the current character count estimate.</div>
 
         <div class="row">
           <label class="switch">
