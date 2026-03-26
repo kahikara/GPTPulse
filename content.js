@@ -2,7 +2,9 @@ const ROOT_ID = 'gptpulse-root';
 
 const DEFAULTS = {
   overlayVisible: true,
-  maxVisibleMessages: 10
+  maxVisibleMessages: 10,
+  autoReloadEnabled: false,
+  autoReloadHiddenThreshold: 120
 };
 
 let settings = { ...DEFAULTS };
@@ -12,7 +14,6 @@ let updateTimer = null;
 let suppressObserver = false;
 let pendingRevealTimer = null;
 let latestRunToken = 0;
-let lastAppliedLimit = null;
 
 bootstrap().catch((error) => {
   console.error('[GPTPulse][content] bootstrap failed', error);
@@ -31,24 +32,15 @@ async function bootstrap() {
     totalCount: 0,
     visibleCount: 0,
     hiddenCount: 0,
-    restoreHint: false,
-    visibleLimit: settings.maxVisibleMessages
+    visibleLimit: settings.maxVisibleMessages,
+    stateLabel: 'Idle'
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
 
-    let previousLimit = settings.maxVisibleMessages;
-
     for (const [key, { newValue }] of Object.entries(changes)) {
       settings[key] = newValue;
-    }
-
-    if (changes.maxVisibleMessages && Number(settings.maxVisibleMessages) > Number(previousLimit)) {
-      const hasCollapsed = document.querySelector('[data-gptpulse-collapsed="1"]');
-      if (hasCollapsed) {
-        lastAppliedLimit = null;
-      }
     }
 
     scheduleUpdate(0);
@@ -93,7 +85,6 @@ function patchHistory() {
 }
 
 function handleNavigation() {
-  lastAppliedLimit = null;
   markTrimPending();
   scheduleUpdate(0);
 }
@@ -141,7 +132,6 @@ function runUpdate(token) {
   const visibleLimit = clampInt(settings.maxVisibleMessages, 1, 200, 10);
   const messages = collectMessageContainers();
 
-  const hadCollapsed = messages.some((m) => m.isCollapsed);
   applyHardCollapse(messages, visibleLimit);
 
   if (token !== latestRunToken) return;
@@ -150,21 +140,25 @@ function runUpdate(token) {
   const hiddenCount = finalMessages.filter((m) => m.isCollapsed).length;
   const visibleCount = finalMessages.length - hiddenCount;
 
-  const restoreHint =
-    hadCollapsed &&
-    lastAppliedLimit !== null &&
-    visibleLimit > lastAppliedLimit &&
-    hiddenCount > 0;
+  const stateLabel = computeStateLabel({
+    visibleCount,
+    hiddenCount,
+    visibleLimit
+  });
 
   renderOverlay({
     totalCount: finalMessages.length,
     visibleCount,
     hiddenCount,
-    restoreHint,
+    visibleLimit,
+    stateLabel
+  });
+
+  maybeAutoReload({
+    hiddenCount,
     visibleLimit
   });
 
-  lastAppliedLimit = visibleLimit;
   markTrimReady();
 }
 
@@ -232,8 +226,6 @@ function applyHardCollapse(messages, visibleLimit) {
         node.setAttribute('aria-hidden', 'true');
         node.style.display = 'none';
         node.replaceChildren(createCollapsedStub());
-      } else {
-        if (!message.isCollapsed) continue;
       }
     }
   });
@@ -246,7 +238,100 @@ function createCollapsedStub() {
   return stub;
 }
 
-function renderOverlay({ totalCount, visibleCount, hiddenCount, restoreHint, visibleLimit }) {
+function computeStateLabel({ visibleCount, hiddenCount, visibleLimit }) {
+  if (hiddenCount > 0 && visibleCount < visibleLimit) {
+    return 'Reload';
+  }
+
+  if (settings.autoReloadEnabled) {
+    const threshold = clampInt(settings.autoReloadHiddenThreshold, 1, 100000, 120);
+    if (hiddenCount >= threshold) {
+      if (isGenerating()) return 'Waiting';
+      if (hasReloadCooldown(hiddenCount)) return 'Cooldown';
+      return 'Ready';
+    }
+  }
+
+  return 'Live';
+}
+
+function maybeAutoReload({ hiddenCount, visibleLimit }) {
+  if (!settings.autoReloadEnabled) return;
+  if (document.hidden) return;
+
+  const threshold = clampInt(settings.autoReloadHiddenThreshold, 1, 100000, 120);
+  if (hiddenCount < threshold) return;
+  if (isGenerating()) return;
+  if (visibleLimit < 1) return;
+  if (hasReloadCooldown(hiddenCount)) return;
+
+  recordReload(hiddenCount);
+  setTimeout(() => {
+    location.reload();
+  }, 120);
+}
+
+function getChatKey() {
+  const match = location.pathname.match(/\/c\/([^/?#]+)/);
+  if (match?.[1]) return match[1];
+  return location.pathname || 'temporary-chat';
+}
+
+function getReloadStorageKey() {
+  return `gptpulseReload:${getChatKey()}`;
+}
+
+function hasReloadCooldown(hiddenCount) {
+  try {
+    const raw = sessionStorage.getItem(getReloadStorageKey());
+    if (!raw) return false;
+
+    const info = JSON.parse(raw);
+    if (!info || typeof info !== 'object') return false;
+
+    const lastHidden = Number(info.hiddenCount || 0);
+    const lastTs = Number(info.ts || 0);
+    const now = Date.now();
+    const deltaNeeded = Math.max(20, Math.floor(clampInt(settings.autoReloadHiddenThreshold, 1, 100000, 120) / 4));
+
+    if (now - lastTs < 15000) return true;
+    if (hiddenCount < lastHidden + deltaNeeded) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function recordReload(hiddenCount) {
+  try {
+    sessionStorage.setItem(
+      getReloadStorageKey(),
+      JSON.stringify({
+        hiddenCount,
+        ts: Date.now()
+      })
+    );
+  } catch {}
+}
+
+function isGenerating() {
+  const selectorMatches = document.querySelector(
+    'button[data-testid*="stop"], button[aria-label*="Stop"], button[aria-label*="stop"]'
+  );
+  if (selectorMatches) return true;
+
+  const buttons = Array.from(document.querySelectorAll('button'));
+  return buttons.some((button) => {
+    if (!(button instanceof HTMLElement)) return false;
+    if (button.offsetParent === null) return false;
+
+    const text = normalizeText(button.innerText || button.textContent || '').toLowerCase();
+    return text === 'stop' || text === 'stop generating' || text.includes('stop generating');
+  });
+}
+
+function renderOverlay({ totalCount, visibleCount, hiddenCount, visibleLimit, stateLabel }) {
   root.innerHTML = `
     <div class="gptpulse-card">
       <div class="gptpulse-head">
@@ -270,8 +355,8 @@ function renderOverlay({ totalCount, visibleCount, hiddenCount, restoreHint, vis
           <span class="gptpulse-value">${formatNumber(visibleLimit)}</span>
         </div>
         <div class="gptpulse-row">
-          <span class="gptpulse-label">Restore</span>
-          <span class="gptpulse-value">${restoreHint ? 'Reload' : 'Live'}</span>
+          <span class="gptpulse-label">State</span>
+          <span class="gptpulse-value">${escapeHtml(stateLabel)}</span>
         </div>
       </div>
     </div>
@@ -307,4 +392,13 @@ function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(String(value), 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, n));
+}
+
+function escapeHtml(input) {
+  return String(input)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }

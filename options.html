@@ -57,7 +57,7 @@
 
     .panel-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.85fr);
+      grid-template-columns: minmax(0, 1.2fr) minmax(300px, 0.9fr);
       gap: 18px;
     }
 
@@ -178,7 +178,7 @@
     <div class="hero">
       <div class="hero-badge">GPTPulse</div>
       <h1>Settings</h1>
-      <p>GPTPulse keeps only the configured number of recent messages visible in the chat. Older messages are fully hidden from the DOM and brought back only when you raise the limit again.</p>
+      <p>GPTPulse keeps only the configured number of recent messages visible. Older messages are collapsed hard. Optional auto reload can refresh the current chat once it grows too large.</p>
     </div>
 
     <div class="panel-grid">
@@ -207,8 +207,8 @@
       </section>
 
       <section class="panel">
-        <h2>Overlay</h2>
-        <div class="panel-copy">The overlay shows total messages, currently visible messages, hidden messages, and the current character count estimate.</div>
+        <h2>Overlay and auto reload</h2>
+        <div class="panel-copy">The overlay is now read only. Auto reload refreshes the current chat after enough messages are hidden and only when nothing is actively generating.</div>
 
         <div class="row">
           <label class="switch">
@@ -217,7 +217,21 @@
           </label>
         </div>
 
-        <div class="small">Changes are saved automatically.</div>
+        <div class="row">
+          <label class="switch">
+            <input id="autoReloadEnabled" type="checkbox">
+            <span>Enable auto reload</span>
+          </label>
+        </div>
+
+        <div style="margin-top: 14px;">
+          <label for="autoReloadHiddenThreshold">Auto reload threshold by hidden messages</label>
+          <input id="autoReloadHiddenThreshold" type="number" min="20" max="5000" step="10" value="120">
+        </div>
+
+        <div class="small" style="margin-top: 14px;">
+          Reload runs only when the chat is idle. GPTPulse also avoids immediate reload loops and waits until the hidden message count has grown further.
+        </div>
       </section>
     </div>
   </div>

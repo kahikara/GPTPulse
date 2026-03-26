@@ -1,6 +1,8 @@
 const DEFAULTS = {
   overlayVisible: true,
-  maxVisibleMessages: 10
+  maxVisibleMessages: 10,
+  autoReloadEnabled: false,
+  autoReloadHiddenThreshold: 120
 };
 
 const els = {
@@ -8,6 +10,8 @@ const els = {
   maxVisibleNumber: document.getElementById('maxVisibleNumber'),
   maxVisibleValue: document.getElementById('maxVisibleValue'),
   overlayVisible: document.getElementById('overlayVisible'),
+  autoReloadEnabled: document.getElementById('autoReloadEnabled'),
+  autoReloadHiddenThreshold: document.getElementById('autoReloadHiddenThreshold'),
   status: document.getElementById('status')
 };
 
@@ -44,12 +48,24 @@ async function init() {
   els.overlayVisible.addEventListener('change', async () => {
     await saveCurrentSettings();
   });
+
+  els.autoReloadEnabled.addEventListener('change', async () => {
+    await saveCurrentSettings();
+  });
+
+  els.autoReloadHiddenThreshold.addEventListener('change', async () => {
+    const value = clampInt(els.autoReloadHiddenThreshold.value, 20, 5000, 120);
+    els.autoReloadHiddenThreshold.value = value;
+    await saveCurrentSettings();
+  });
 }
 
 function applySettingsToUi(settings) {
   const value = clampInt(settings.maxVisibleMessages, 1, 200, 10);
   updateVisibleControls(value);
   els.overlayVisible.checked = !!settings.overlayVisible;
+  els.autoReloadEnabled.checked = !!settings.autoReloadEnabled;
+  els.autoReloadHiddenThreshold.value = clampInt(settings.autoReloadHiddenThreshold, 20, 5000, 120);
 }
 
 function updateVisibleControls(value) {
@@ -61,10 +77,14 @@ function updateVisibleControls(value) {
 async function saveCurrentSettings() {
   const maxVisibleMessages = clampInt(els.maxVisibleNumber.value, 1, 200, 10);
   const overlayVisible = !!els.overlayVisible.checked;
+  const autoReloadEnabled = !!els.autoReloadEnabled.checked;
+  const autoReloadHiddenThreshold = clampInt(els.autoReloadHiddenThreshold.value, 20, 5000, 120);
 
   await chrome.storage.local.set({
     maxVisibleMessages,
-    overlayVisible
+    overlayVisible,
+    autoReloadEnabled,
+    autoReloadHiddenThreshold
   });
 
   setStatus('Saved');
