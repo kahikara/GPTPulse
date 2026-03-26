@@ -31,7 +31,8 @@ async function bootstrap() {
     totalCount: 0,
     visibleCount: 0,
     hiddenCount: 0,
-    restoreHint: false
+    restoreHint: false,
+    visibleLimit: settings.maxVisibleMessages
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -159,7 +160,8 @@ function runUpdate(token) {
     totalCount: finalMessages.length,
     visibleCount,
     hiddenCount,
-    restoreHint
+    restoreHint,
+    visibleLimit
   });
 
   lastAppliedLimit = visibleLimit;
@@ -244,9 +246,7 @@ function createCollapsedStub() {
   return stub;
 }
 
-function renderOverlay({ totalCount, visibleCount, hiddenCount, restoreHint }) {
-  const sliderValue = clampInt(settings.maxVisibleMessages, 1, 200, 10);
-
+function renderOverlay({ totalCount, visibleCount, hiddenCount, restoreHint, visibleLimit }) {
   root.innerHTML = `
     <div class="gptpulse-card">
       <div class="gptpulse-head">
@@ -266,33 +266,16 @@ function renderOverlay({ totalCount, visibleCount, hiddenCount, restoreHint }) {
           <span class="gptpulse-value">${formatNumber(hiddenCount)}</span>
         </div>
         <div class="gptpulse-row">
+          <span class="gptpulse-label">Limit</span>
+          <span class="gptpulse-value">${formatNumber(visibleLimit)}</span>
+        </div>
+        <div class="gptpulse-row">
           <span class="gptpulse-label">Restore</span>
           <span class="gptpulse-value">${restoreHint ? 'Reload' : 'Live'}</span>
-        </div>
-        <div class="gptpulse-slider-wrap">
-          <div class="gptpulse-slider-head">
-            <span class="gptpulse-label">Visible messages</span>
-            <span class="gptpulse-value" id="gptpulse-slider-value">${formatNumber(sliderValue)}</span>
-          </div>
-          <input class="gptpulse-slider" id="gptpulse-slider" type="range" min="1" max="200" step="1" value="${sliderValue}">
         </div>
       </div>
     </div>
   `;
-
-  const slider = root.querySelector('#gptpulse-slider');
-  const sliderValueEl = root.querySelector('#gptpulse-slider-value');
-
-  slider?.addEventListener('input', () => {
-    if (sliderValueEl) {
-      sliderValueEl.textContent = formatNumber(slider.value);
-    }
-  });
-
-  slider?.addEventListener('change', async () => {
-    const next = clampInt(slider.value, 1, 200, 10);
-    await chrome.storage.local.set({ maxVisibleMessages: next });
-  });
 }
 
 function withDomChanges(fn) {
