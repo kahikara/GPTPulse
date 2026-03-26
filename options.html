@@ -166,6 +166,49 @@
       gap: 14px;
     }
 
+    .support-box {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .support-title {
+      margin: 0 0 8px;
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .support-copy {
+      margin: 0 0 14px;
+      color: rgba(255,255,255,0.66);
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    .support-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 11px 16px;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.06);
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: background 120ms ease, transform 120ms ease;
+    }
+
+    .support-button:hover {
+      background: rgba(255,255,255,0.12);
+    }
+
+    .support-button:active {
+      transform: translateY(1px);
+    }
+
     @media (max-width: 760px) {
       .panel-grid {
         grid-template-columns: 1fr;
@@ -231,6 +274,19 @@
 
         <div class="small" style="margin-top: 14px;">
           Reload runs only when the chat is idle. GPTPulse also avoids immediate reload loops and waits until the hidden message count has grown further.
+        </div>
+
+        <div class="support-box">
+          <h3 class="support-title">Support GPTPulse</h3>
+          <p class="support-copy">If GPTPulse is useful to you and you want to support the project, you can buy me a coffee.</p>
+          <a
+            class="support-button"
+            href="https://ko-fi.com/ming83"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Support on Ko-fi
+          </a>
         </div>
       </section>
     </div>
