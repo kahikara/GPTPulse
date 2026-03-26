@@ -84,3 +84,14 @@ html.gptpulse-trim-pending main {
   margin: 0;
   accent-color: #ffffff;
 }
+
+.gptpulse-collapsed-stub {
+  display: block;
+  width: 1px;
+  height: 1px;
+  min-width: 1px;
+  min-height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}

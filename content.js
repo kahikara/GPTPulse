@@ -12,6 +12,7 @@ let updateTimer = null;
 let suppressObserver = false;
 let pendingRevealTimer = null;
 let latestRunToken = 0;
+let lastAppliedLimit = null;
 
 bootstrap().catch((error) => {
   console.error('[GPTPulse][content] bootstrap failed', error);
@@ -29,14 +30,24 @@ async function bootstrap() {
   renderOverlay({
     totalCount: 0,
     visibleCount: 0,
-    hiddenCount: 0
+    hiddenCount: 0,
+    restoreHint: false
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
 
+    let previousLimit = settings.maxVisibleMessages;
+
     for (const [key, { newValue }] of Object.entries(changes)) {
       settings[key] = newValue;
+    }
+
+    if (changes.maxVisibleMessages && Number(settings.maxVisibleMessages) > Number(previousLimit)) {
+      const hasCollapsed = document.querySelector('[data-gptpulse-collapsed="1"]');
+      if (hasCollapsed) {
+        lastAppliedLimit = null;
+      }
     }
 
     scheduleUpdate(0);
@@ -81,6 +92,7 @@ function patchHistory() {
 }
 
 function handleNavigation() {
+  lastAppliedLimit = null;
   markTrimPending();
   scheduleUpdate(0);
 }
@@ -125,26 +137,40 @@ function runUpdate(token) {
   ensureRoot();
   root.style.display = settings.overlayVisible ? '' : 'none';
 
-  const messages = collectMessageContainers();
   const visibleLimit = clampInt(settings.maxVisibleMessages, 1, 200, 10);
+  const messages = collectMessageContainers();
 
-  applyVisibility(messages, visibleLimit);
+  const hadCollapsed = messages.some((m) => m.isCollapsed);
+  applyHardCollapse(messages, visibleLimit);
 
   if (token !== latestRunToken) return;
 
-  const hiddenCount = Math.max(0, messages.length - Math.min(messages.length, visibleLimit));
+  const finalMessages = collectMessageContainers();
+  const hiddenCount = finalMessages.filter((m) => m.isCollapsed).length;
+  const visibleCount = finalMessages.length - hiddenCount;
+
+  const restoreHint =
+    hadCollapsed &&
+    lastAppliedLimit !== null &&
+    visibleLimit > lastAppliedLimit &&
+    hiddenCount > 0;
 
   renderOverlay({
-    totalCount: messages.length,
-    visibleCount: messages.length - hiddenCount,
-    hiddenCount
+    totalCount: finalMessages.length,
+    visibleCount,
+    hiddenCount,
+    restoreHint
   });
 
+  lastAppliedLimit = visibleLimit;
   markTrimReady();
 }
 
 function collectMessageContainers() {
-  const nodes = Array.from(document.querySelectorAll('main [data-message-author-role], [data-message-author-role]'));
+  const nodes = Array.from(document.querySelectorAll(
+    '[data-gptpulse-message-root="1"], main [data-message-author-role], [data-message-author-role]'
+  ));
+
   const seen = new Set();
   const result = [];
 
@@ -152,54 +178,73 @@ function collectMessageContainers() {
     if (!(node instanceof HTMLElement)) continue;
     if (root && (node === root || root.contains(node))) continue;
 
-    const container = node.closest('article') || node;
+    let container;
+    if (node.dataset.gptpulseMessageRoot === '1') {
+      container = node;
+    } else {
+      container = node.closest('article') || node;
+    }
+
     if (!(container instanceof HTMLElement)) continue;
     if (!container.isConnected) continue;
     if (root && (container === root || root.contains(container))) continue;
     if (seen.has(container)) continue;
 
+    container.dataset.gptpulseMessageRoot = '1';
     seen.add(container);
-    result.push(container);
+
+    const isCollapsed = container.dataset.gptpulseCollapsed === '1';
+    const charCount = isCollapsed
+      ? Number(container.dataset.gptpulseCharCount || 0)
+      : getVisibleCharCount(container);
+
+    result.push({
+      node: container,
+      isCollapsed,
+      charCount
+    });
   }
 
   return result;
 }
 
-function applyVisibility(messages, visibleLimit) {
+function getVisibleCharCount(node) {
+  const text = normalizeText(node.innerText || node.textContent || '');
+  return text.length;
+}
+
+function applyHardCollapse(messages, visibleLimit) {
   const cutoff = Math.max(0, messages.length - visibleLimit);
 
   withDomChanges(() => {
     for (let i = 0; i < messages.length; i++) {
-      const node = messages[i];
-      const shouldHide = i < cutoff;
-      const isHidden = node.dataset.gptpulseHidden === '1';
+      const message = messages[i];
+      const node = message.node;
+      const shouldCollapse = i < cutoff;
 
-      if (shouldHide && !isHidden) {
-        if (node.dataset.gptpulsePrevDisplay === undefined) {
-          node.dataset.gptpulsePrevDisplay = node.style.display || '';
-        }
+      if (shouldCollapse) {
+        if (message.isCollapsed) continue;
 
-        node.dataset.gptpulseHidden = '1';
+        node.dataset.gptpulseCollapsed = '1';
+        node.dataset.gptpulseCharCount = String(message.charCount);
         node.setAttribute('aria-hidden', 'true');
         node.style.display = 'none';
-      } else if (!shouldHide && isHidden) {
-        const prevDisplay = node.dataset.gptpulsePrevDisplay || '';
-
-        if (prevDisplay) {
-          node.style.display = prevDisplay;
-        } else {
-          node.style.removeProperty('display');
-        }
-
-        node.removeAttribute('aria-hidden');
-        delete node.dataset.gptpulseHidden;
-        delete node.dataset.gptpulsePrevDisplay;
+        node.replaceChildren(createCollapsedStub());
+      } else {
+        if (!message.isCollapsed) continue;
       }
     }
   });
 }
 
-function renderOverlay({ totalCount, visibleCount, hiddenCount }) {
+function createCollapsedStub() {
+  const stub = document.createElement('div');
+  stub.className = 'gptpulse-collapsed-stub';
+  stub.setAttribute('aria-hidden', 'true');
+  return stub;
+}
+
+function renderOverlay({ totalCount, visibleCount, hiddenCount, restoreHint }) {
   const sliderValue = clampInt(settings.maxVisibleMessages, 1, 200, 10);
 
   root.innerHTML = `
@@ -219,6 +264,10 @@ function renderOverlay({ totalCount, visibleCount, hiddenCount }) {
         <div class="gptpulse-row">
           <span class="gptpulse-label">Hidden</span>
           <span class="gptpulse-value">${formatNumber(hiddenCount)}</span>
+        </div>
+        <div class="gptpulse-row">
+          <span class="gptpulse-label">Restore</span>
+          <span class="gptpulse-value">${restoreHint ? 'Reload' : 'Live'}</span>
         </div>
         <div class="gptpulse-slider-wrap">
           <div class="gptpulse-slider-head">
@@ -255,6 +304,16 @@ function withDomChanges(fn) {
       suppressObserver = false;
     });
   }
+}
+
+function normalizeText(text) {
+  return String(text)
+    .replace(/\u00A0/g, ' ')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
 }
 
 function formatNumber(num) {
