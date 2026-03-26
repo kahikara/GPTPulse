@@ -178,17 +178,17 @@
     <div class="hero">
       <div class="hero-badge">GPTPulse</div>
       <h1>Settings</h1>
-      <p>GPTPulse keeps only a small live ChatGPT DOM window and turns older messages into lightweight archived text blocks. That is much more aggressive than simply hiding old messages.</p>
+      <p>GPTPulse keeps only the last N messages fully rendered. Older messages are compacted into lightweight text blocks inside the chat to reduce DOM size and render cost.</p>
     </div>
 
     <div class="panel-grid">
       <section class="panel">
-        <h2>Visible messages</h2>
-        <div class="panel-copy">Choose how many recent messages stay visible in total. Older parts of the chat are shown in lightweight mode instead of full ChatGPT rendering.</div>
+        <h2>Live messages</h2>
+        <div class="panel-copy">Choose how many recent messages should stay fully rendered. Older messages remain readable, but in a lighter format.</div>
 
         <div class="limit-preview">
           <div class="limit-preview-value" id="maxVisibleValue">10</div>
-          <div class="limit-preview-label">messages visible</div>
+          <div class="limit-preview-label">fully rendered</div>
         </div>
 
         <div class="range-stack">
@@ -208,7 +208,7 @@
 
       <section class="panel">
         <h2>Overlay</h2>
-        <div class="panel-copy">The small overlay in the top right shows how many messages are live, hidden, and how large the chat is overall.</div>
+        <div class="panel-copy">The compact overlay in the top right shows how many messages are still fully live and how many were compacted.</div>
 
         <div class="row">
           <label class="switch">

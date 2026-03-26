@@ -1,10 +1,7 @@
 const ROOT_ID = 'gptpulse-root';
-const ARCHIVE_BLOCK_ID = 'gptpulse-archive-block';
-const DB_NAME = 'gptpulse-archive';
+const DB_NAME = 'gptpulse-snapshots';
 const DB_VERSION = 1;
-const META_STORE = 'chatMeta';
-const MESSAGE_STORE = 'chatMessages';
-const LIVE_DOM_CAP = 12;
+const STORE_NAME = 'snapshots';
 
 const DEFAULTS = {
   overlayVisible: true,
@@ -18,8 +15,8 @@ let updateTimer = null;
 let suppressObserver = false;
 let pendingRevealTimer = null;
 let latestRunToken = 0;
-let currentState = makeChatState(getChatId());
 let dbPromise = null;
+let currentState = makeChatState(getChatId());
 
 bootstrap().catch((error) => {
   console.error('[GPTPulse][content] bootstrap failed', error);
@@ -34,6 +31,12 @@ async function bootstrap() {
   settings = { ...DEFAULTS, ...stored };
 
   ensureRoot();
+  renderOverlay({
+    totalCount: 0,
+    liveCount: 0,
+    compactedCount: 0,
+    totalChars: 0
+  });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
@@ -64,13 +67,28 @@ async function bootstrap() {
     if (!document.hidden) scheduleUpdate(0);
   });
 
-  renderOverlay({
-    totalCount: 0,
-    shownCount: 0,
-    hiddenCount: 0,
-    totalChars: 0
-  });
+  scheduleUpdate(0);
+}
 
+function makeChatState(chatId) {
+  return {
+    chatId,
+    nextSeq: 1,
+    prepPromise: clearChatSnapshots(chatId)
+  };
+}
+
+function ensureCurrentState() {
+  const chatId = getChatId();
+  if (!currentState || currentState.chatId !== chatId) {
+    currentState = makeChatState(chatId);
+  }
+  return currentState;
+}
+
+function handleNavigation() {
+  currentState = makeChatState(getChatId());
+  markTrimPending();
   scheduleUpdate(0);
 }
 
@@ -88,28 +106,6 @@ function patchHistory() {
       return result;
     };
   }
-}
-
-function handleNavigation() {
-  currentState = makeChatState(getChatId());
-  removeArchiveBlock();
-  markTrimPending();
-  scheduleUpdate(0);
-}
-
-function makeChatState(chatId) {
-  return {
-    chatId,
-    prepPromise: clearChatArchive(chatId)
-  };
-}
-
-function ensureCurrentState() {
-  const chatId = getChatId();
-  if (!currentState || currentState.chatId !== chatId) {
-    currentState = makeChatState(chatId);
-  }
-  return currentState;
 }
 
 function ensureRoot() {
@@ -147,76 +143,152 @@ function scheduleUpdate(delay = 80) {
 }
 
 async function runUpdate(token) {
-  ensureRoot();
   const state = ensureCurrentState();
 
   try {
     await state.prepPromise;
   } catch (error) {
-    console.warn('[GPTPulse] archive clear failed', error);
+    console.warn('[GPTPulse] snapshot clear failed', error);
   }
 
   if (token !== latestRunToken) return;
 
-  if (settings.overlayVisible) {
-    root.style.display = '';
-  } else {
-    root.style.display = 'none';
+  ensureRoot();
+  root.style.display = settings.overlayVisible ? '' : 'none';
+
+  const messages = collectMessages(state);
+
+  if (!messages.length) {
+    renderOverlay({
+      totalCount: 0,
+      liveCount: 0,
+      compactedCount: 0,
+      totalChars: 0
+    });
+    markTrimReady();
+    return;
   }
 
-  const visibleTarget = clampInt(settings.maxVisibleMessages, 1, 200, 10);
-  const liveTarget = Math.min(visibleTarget, LIVE_DOM_CAP);
+  const liveLimit = clampInt(settings.maxVisibleMessages, 1, 200, 10);
+  const cutoff = Math.max(0, messages.length - liveLimit);
 
-  let realMessages = collectRealMessages();
-
-  if (realMessages.length > liveTarget) {
-    markTrimPending();
-    const overflow = realMessages.slice(0, realMessages.length - liveTarget);
-    await archiveAndRemoveMessages(state.chatId, overflow);
+  for (let i = 0; i < messages.length; i++) {
     if (token !== latestRunToken) return;
-    realMessages = collectRealMessages();
+
+    const message = messages[i];
+
+    if (i < cutoff) {
+      if (!message.isCompacted) {
+        await compactMessage(state.chatId, message);
+      }
+    } else {
+      if (message.isCompacted) {
+        await restoreMessage(state.chatId, message);
+      }
+    }
   }
 
-  const meta = await getChatMeta(state.chatId);
   if (token !== latestRunToken) return;
 
-  const archiveVisibleTarget = Math.max(0, visibleTarget - realMessages.length);
-  const archiveVisibleEntries = archiveVisibleTarget > 0
-    ? await getTailArchivedMessages(state.chatId, archiveVisibleTarget)
-    : [];
+  const finalMessages = collectMessages(state);
+  const totalChars = finalMessages.reduce((sum, item) => sum + item.charCount, 0);
+  const compactedCount = finalMessages.filter((item) => item.isCompacted).length;
+  const liveCount = finalMessages.length - compactedCount;
 
-  if (token !== latestRunToken) return;
-
-  renderArchiveBlock(archiveVisibleEntries, meta.count);
   renderOverlay({
-    totalCount: realMessages.length + meta.count,
-    shownCount: realMessages.length + archiveVisibleEntries.length,
-    hiddenCount: Math.max(0, meta.count - archiveVisibleEntries.length),
-    totalChars: sumChars(realMessages) + (meta.totalChars || 0)
+    totalCount: finalMessages.length,
+    liveCount,
+    compactedCount,
+    totalChars
   });
 
   markTrimReady();
 }
 
-async function archiveAndRemoveMessages(chatId, messages) {
-  if (!messages.length) return;
+function collectMessages(state) {
+  const candidates = Array.from(document.querySelectorAll('main [data-message-author-role], [data-message-author-role]'));
+  const seenContainers = new Set();
+  const messages = [];
 
-  const snapshots = messages.map((message) => ({
+  for (const node of candidates) {
+    if (!(node instanceof HTMLElement)) continue;
+    if (root && (node === root || root.contains(node))) continue;
+
+    const container = node.closest('article') || node;
+    if (!(container instanceof HTMLElement)) continue;
+    if (!container.isConnected) continue;
+    if (root && (container === root || root.contains(container))) continue;
+    if (seenContainers.has(container)) continue;
+
+    const isCompacted = container.dataset.gptpulseCompacted === '1';
+    const role = isCompacted
+      ? (container.dataset.gptpulseRole || 'message')
+      : extractRole(container);
+
+    const text = isCompacted
+      ? normalizeText(container.querySelector('.gptpulse-compact-text')?.textContent || '')
+      : normalizeText(container.innerText || container.textContent || '');
+
+    if (!text) continue;
+
+    seenContainers.add(container);
+
+    if (!container.dataset.gptpulseSeq) {
+      container.dataset.gptpulseSeq = String(state.nextSeq++);
+    }
+
+    messages.push({
+      node: container,
+      seq: Number(container.dataset.gptpulseSeq),
+      role,
+      text,
+      charCount: text.length,
+      isCompacted
+    });
+  }
+
+  return messages.sort((a, b) => a.seq - b.seq);
+}
+
+function extractRole(container) {
+  const roleNode = container.querySelector('[data-message-author-role]');
+  return roleNode?.getAttribute('data-message-author-role') || 'message';
+}
+
+async function compactMessage(chatId, message) {
+  await putSnapshot(chatId, message.seq, {
+    html: message.node.innerHTML,
     role: message.role,
     text: message.text,
     charCount: message.charCount
-  }));
+  });
 
-  await appendArchivedMessages(chatId, snapshots);
+  const compactHtml = `
+    <div class="gptpulse-compact-shell">
+      <div class="gptpulse-compact-role">${escapeHtml(formatRole(message.role))}</div>
+      <div class="gptpulse-compact-text">${escapeHtml(message.text)}</div>
+    </div>
+  `;
 
   withDomChanges(() => {
-    for (const message of messages) {
-      message.node.remove();
-    }
+    message.node.dataset.gptpulseCompacted = '1';
+    message.node.dataset.gptpulseRole = message.role;
+    message.node.innerHTML = compactHtml;
   });
 }
 
-function renderOverlay({ totalCount, shownCount, hiddenCount, totalChars }) {
+async function restoreMessage(chatId, message) {
+  const snapshot = await getSnapshot(chatId, message.seq);
+  if (!snapshot?.html) return;
+
+  withDomChanges(() => {
+    message.node.innerHTML = snapshot.html;
+    delete message.node.dataset.gptpulseCompacted;
+    delete message.node.dataset.gptpulseRole;
+  });
+}
+
+function renderOverlay({ totalCount, liveCount, compactedCount, totalChars }) {
   const sliderValue = clampInt(settings.maxVisibleMessages, 1, 200, 10);
 
   root.innerHTML = `
@@ -226,12 +298,16 @@ function renderOverlay({ totalCount, shownCount, hiddenCount, totalChars }) {
       </div>
       <div class="gptpulse-body">
         <div class="gptpulse-row">
-          <span class="gptpulse-label">Showing</span>
-          <span class="gptpulse-value">${formatNumber(shownCount)} / ${formatNumber(totalCount)}</span>
+          <span class="gptpulse-label">Total</span>
+          <span class="gptpulse-value">${formatNumber(totalCount)}</span>
         </div>
         <div class="gptpulse-row">
-          <span class="gptpulse-label">Hidden</span>
-          <span class="gptpulse-value">${formatNumber(hiddenCount)}</span>
+          <span class="gptpulse-label">Live</span>
+          <span class="gptpulse-value">${formatNumber(liveCount)}</span>
+        </div>
+        <div class="gptpulse-row">
+          <span class="gptpulse-label">Compacted</span>
+          <span class="gptpulse-value">${formatNumber(compactedCount)}</span>
         </div>
         <div class="gptpulse-row">
           <span class="gptpulse-label">Chars</span>
@@ -239,7 +315,7 @@ function renderOverlay({ totalCount, shownCount, hiddenCount, totalChars }) {
         </div>
         <div class="gptpulse-slider-wrap">
           <div class="gptpulse-slider-head">
-            <span class="gptpulse-label">Visible messages</span>
+            <span class="gptpulse-label">Live messages</span>
             <span class="gptpulse-value" id="gptpulse-slider-value">${formatNumber(sliderValue)}</span>
           </div>
           <input class="gptpulse-slider" id="gptpulse-slider" type="range" min="1" max="200" step="1" value="${sliderValue}">
@@ -261,107 +337,6 @@ function renderOverlay({ totalCount, shownCount, hiddenCount, totalChars }) {
     const next = clampInt(slider.value, 1, 200, 10);
     await chrome.storage.local.set({ maxVisibleMessages: next });
   });
-}
-
-function renderArchiveBlock(entries, totalArchivedCount) {
-  removeArchiveBlock();
-
-  if (!entries.length) return;
-
-  const firstReal = collectRealMessages()[0]?.node || null;
-  const parent = firstReal?.parentNode || findThreadParent();
-  if (!parent) return;
-
-  const block = document.createElement('div');
-  block.id = ARCHIVE_BLOCK_ID;
-  block.setAttribute('data-gptpulse-archive-block', '1');
-
-  const hiddenCount = Math.max(0, totalArchivedCount - entries.length);
-
-  block.innerHTML = `
-    <div class="gptpulse-archive-summary">
-      <span><strong>${formatNumber(entries.length)}</strong> archived messages rendered in lightweight mode</span>
-      <span>${formatNumber(hiddenCount)} still collapsed</span>
-    </div>
-    <div class="gptpulse-archive-list">
-      ${entries.map(renderArchiveItem).join('')}
-    </div>
-  `;
-
-  withDomChanges(() => {
-    parent.insertBefore(block, firstReal);
-  });
-}
-
-function renderArchiveItem(entry) {
-  return `
-    <div class="gptpulse-archive-item">
-      <div class="gptpulse-archive-role">${escapeHtml(formatRole(entry.role))}</div>
-      <div class="gptpulse-archive-text">${escapeHtml(entry.text)}</div>
-    </div>
-  `;
-}
-
-function formatRole(role) {
-  if (role === 'user') return 'You';
-  if (role === 'assistant') return 'Assistant';
-  if (role === 'system') return 'System';
-  return role || 'Message';
-}
-
-function removeArchiveBlock() {
-  const existing = document.getElementById(ARCHIVE_BLOCK_ID);
-  if (existing) {
-    withDomChanges(() => {
-      existing.remove();
-    });
-  }
-}
-
-function collectRealMessages() {
-  const candidates = Array.from(document.querySelectorAll('main [data-message-author-role], [data-message-author-role]'));
-  const seenContainers = new Set();
-  const messages = [];
-
-  for (const node of candidates) {
-    if (!(node instanceof HTMLElement)) continue;
-    if (root && (node === root || root.contains(node))) continue;
-    if (node.closest('[data-gptpulse-archive-block="1"]')) continue;
-
-    const container = node.closest('article') || node;
-    if (!(container instanceof HTMLElement)) continue;
-    if (!container.isConnected) continue;
-    if (root && (container === root || root.contains(container))) continue;
-    if (container.closest('[data-gptpulse-archive-block="1"]')) continue;
-    if (seenContainers.has(container)) continue;
-
-    const text = normalizeText(container.innerText || container.textContent || '');
-    if (!text) continue;
-
-    seenContainers.add(container);
-
-    messages.push({
-      node: container,
-      role: extractRole(container),
-      text,
-      charCount: text.length
-    });
-  }
-
-  return messages;
-}
-
-function extractRole(container) {
-  const roleNode = container.querySelector('[data-message-author-role]');
-  return roleNode?.getAttribute('data-message-author-role') || 'message';
-}
-
-function findThreadParent() {
-  const firstReal = collectRealMessages()[0]?.node;
-  if (firstReal?.parentNode) return firstReal.parentNode;
-
-  const main = document.querySelector('main');
-  return main || null;
 }
 
 function withDomChanges(fn) {
@@ -391,8 +366,11 @@ function getChatId() {
   return location.pathname || 'temporary-chat';
 }
 
-function sumChars(items) {
-  return items.reduce((sum, item) => sum + (item.charCount || 0), 0);
+function formatRole(role) {
+  if (role === 'user') return 'You';
+  if (role === 'assistant') return 'Assistant';
+  if (role === 'system') return 'System';
+  return role || 'Message';
 }
 
 function formatCompact(num) {
@@ -428,13 +406,8 @@ function openDb() {
 
     request.onupgradeneeded = () => {
       const db = request.result;
-
-      if (!db.objectStoreNames.contains(META_STORE)) {
-        db.createObjectStore(META_STORE, { keyPath: 'chatId' });
-      }
-
-      if (!db.objectStoreNames.contains(MESSAGE_STORE)) {
-        db.createObjectStore(MESSAGE_STORE, { keyPath: ['chatId', 'seq'] });
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: ['chatId', 'seq'] });
       }
     };
 
@@ -445,121 +418,57 @@ function openDb() {
   return dbPromise;
 }
 
-async function clearChatArchive(chatId) {
+async function clearChatSnapshots(chatId) {
   const db = await openDb();
 
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction([META_STORE, MESSAGE_STORE], 'readwrite');
-    const metaStore = tx.objectStore(META_STORE);
-    const messageStore = tx.objectStore(MESSAGE_STORE);
-
-    metaStore.delete(chatId);
-
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
     const range = IDBKeyRange.bound([chatId, 0], [chatId, Number.MAX_SAFE_INTEGER]);
-    const cursorRequest = messageStore.openCursor(range);
+    const request = store.openCursor(range);
 
-    cursorRequest.onsuccess = () => {
-      const cursor = cursorRequest.result;
+    request.onsuccess = () => {
+      const cursor = request.result;
       if (!cursor) return;
       cursor.delete();
       cursor.continue();
     };
 
-    cursorRequest.onerror = () => reject(cursorRequest.error);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-async function getChatMeta(chatId) {
-  const db = await openDb();
-
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(META_STORE, 'readonly');
-    const store = tx.objectStore(META_STORE);
-    const request = store.get(chatId);
-
-    request.onsuccess = () => {
-      resolve(request.result || {
-        chatId,
-        count: 0,
-        totalChars: 0,
-        lastSeq: 0
-      });
-    };
-
     request.onerror = () => reject(request.error);
-  });
-}
-
-async function appendArchivedMessages(chatId, snapshots) {
-  if (!snapshots.length) return;
-
-  const db = await openDb();
-
-  await new Promise((resolve, reject) => {
-    const tx = db.transaction([META_STORE, MESSAGE_STORE], 'readwrite');
-    const metaStore = tx.objectStore(META_STORE);
-    const messageStore = tx.objectStore(MESSAGE_STORE);
-    const metaRequest = metaStore.get(chatId);
-
-    metaRequest.onsuccess = () => {
-      const meta = metaRequest.result || {
-        chatId,
-        count: 0,
-        totalChars: 0,
-        lastSeq: 0
-      };
-
-      for (const snapshot of snapshots) {
-        meta.lastSeq += 1;
-        meta.count += 1;
-        meta.totalChars += snapshot.charCount || 0;
-
-        messageStore.put({
-          chatId,
-          seq: meta.lastSeq,
-          role: snapshot.role,
-          text: snapshot.text,
-          charCount: snapshot.charCount || 0
-        });
-      }
-
-      metaStore.put(meta);
-    };
-
-    metaRequest.onerror = () => reject(metaRequest.error);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);
   });
 }
 
-async function getTailArchivedMessages(chatId, limit) {
-  if (limit <= 0) return [];
-
+async function putSnapshot(chatId, seq, value) {
   const db = await openDb();
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(MESSAGE_STORE, 'readonly');
-    const store = tx.objectStore(MESSAGE_STORE);
-    const range = IDBKeyRange.bound([chatId, 0], [chatId, Number.MAX_SAFE_INTEGER]);
-    const request = store.openCursor(range, 'prev');
-    const result = [];
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
 
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor || result.length >= limit) {
-        result.reverse();
-        resolve(result);
-        return;
-      }
+    store.put({
+      chatId,
+      seq,
+      ...value
+    });
 
-      result.push(cursor.value);
-      cursor.continue();
-    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
 
+async function getSnapshot(chatId, seq) {
+  const db = await openDb();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.get([chatId, seq]);
+
+    request.onsuccess = () => resolve(request.result || null);
     request.onerror = () => reject(request.error);
   });
 }
