@@ -1,7 +1,9 @@
 const ROOT_ID = 'gptpulse-root';
-const DB_NAME = 'gptpulse-snapshots';
+const ARCHIVE_SUMMARY_ID = 'gptpulse-archive-summary';
+const DB_NAME = 'gptpulse-archive';
 const DB_VERSION = 1;
-const STORE_NAME = 'snapshots';
+const META_STORE = 'chatMeta';
+const SNAPSHOT_STORE = 'chatSnapshots';
 
 const DEFAULTS = {
   overlayVisible: true,
@@ -74,7 +76,7 @@ function makeChatState(chatId) {
   return {
     chatId,
     nextSeq: 1,
-    prepPromise: clearChatSnapshots(chatId)
+    prepPromise: clearChatArchive(chatId)
   };
 }
 
@@ -88,6 +90,7 @@ function ensureCurrentState() {
 
 function handleNavigation() {
   currentState = makeChatState(getChatId());
+  removeArchiveSummary();
   markTrimPending();
   scheduleUpdate(0);
 }
@@ -148,7 +151,7 @@ async function runUpdate(token) {
   try {
     await state.prepPromise;
   } catch (error) {
-    console.warn('[GPTPulse] clear snapshots failed', error);
+    console.warn('[GPTPulse] clear archive failed', error);
   }
 
   if (token !== latestRunToken) return;
@@ -158,36 +161,80 @@ async function runUpdate(token) {
 
   let messages = collectMessages(state);
   const targetVisible = clampInt(settings.maxVisibleMessages, 1, 200, 10);
-  const cutoff = Math.max(0, messages.length - targetVisible);
 
-  for (let i = 0; i < messages.length; i++) {
+  if (messages.length > targetVisible) {
+    markTrimPending();
+
+    const overflow = messages.slice(0, messages.length - targetVisible);
+    await archiveAndRemoveMessages(state.chatId, overflow);
+
     if (token !== latestRunToken) return;
+    messages = collectMessages(state);
+  }
 
-    const message = messages[i];
+  if (messages.length < targetVisible) {
+    const restoreCount = targetVisible - messages.length;
+    if (restoreCount > 0) {
+      await restoreNewestArchivedMessages(state.chatId, restoreCount);
 
-    if (i < cutoff) {
-      if (!message.isHiddenByPulse) {
-        await hideMessage(state.chatId, message);
-      }
-    } else {
-      if (message.isHiddenByPulse) {
-        await restoreMessage(state.chatId, message);
-      }
+      if (token !== latestRunToken) return;
+      messages = collectMessages(state);
     }
   }
 
+  const meta = await getChatMeta(state.chatId);
   if (token !== latestRunToken) return;
 
-  messages = collectMessages(state);
-
+  renderArchiveSummary(meta.count);
   renderOverlay({
-    totalCount: messages.length,
-    visibleCount: messages.filter((m) => !m.isHiddenByPulse).length,
-    hiddenCount: messages.filter((m) => m.isHiddenByPulse).length,
-    totalChars: sumChars(messages)
+    totalCount: messages.length + meta.count,
+    visibleCount: messages.length,
+    hiddenCount: meta.count,
+    totalChars: sumChars(messages) + (meta.totalChars || 0)
   });
 
   markTrimReady();
+}
+
+async function archiveAndRemoveMessages(chatId, messages) {
+  if (!messages.length) return;
+
+  const snapshots = messages.map((message) => ({
+    seq: message.seq,
+    outerHTML: message.node.outerHTML,
+    charCount: message.charCount
+  }));
+
+  await appendSnapshots(chatId, snapshots);
+
+  withDomChanges(() => {
+    for (const message of messages) {
+      message.node.remove();
+    }
+  });
+}
+
+async function restoreNewestArchivedMessages(chatId, count) {
+  const snapshots = await takeNewestSnapshots(chatId, count);
+  if (!snapshots.length) return;
+
+  const firstVisible = collectVisibleMessageNodes()[0] || null;
+  const parent = firstVisible?.parentNode || findThreadParent();
+  if (!parent) return;
+
+  withDomChanges(() => {
+    const range = document.createRange();
+    range.selectNode(parent);
+
+    for (const snapshot of snapshots) {
+      const fragment = range.createContextualFragment(snapshot.outerHTML);
+      parent.insertBefore(fragment, firstVisible);
+    }
+  });
+}
+
+function collectVisibleMessageNodes() {
+  return collectMessages(ensureCurrentState()).map((message) => message.node);
 }
 
 function collectMessages(state) {
@@ -198,12 +245,17 @@ function collectMessages(state) {
   for (const node of candidates) {
     if (!(node instanceof HTMLElement)) continue;
     if (root && (node === root || root.contains(node))) continue;
+    if (node.closest(`#${ARCHIVE_SUMMARY_ID}`)) continue;
 
     const container = node.closest('article') || node;
     if (!(container instanceof HTMLElement)) continue;
     if (!container.isConnected) continue;
     if (root && (container === root || root.contains(container))) continue;
+    if (container.closest(`#${ARCHIVE_SUMMARY_ID}`)) continue;
     if (seenContainers.has(container)) continue;
+
+    const text = normalizeText(container.innerText || container.textContent || '');
+    if (!text) continue;
 
     seenContainers.add(container);
 
@@ -216,20 +268,10 @@ function collectMessages(state) {
       }
     }
 
-    const isHiddenByPulse = container.dataset.gptpulseHidden === '1';
-    const text = isHiddenByPulse
-      ? (container.dataset.gptpulseCharCount ? 'x'.repeat(Number(container.dataset.gptpulseCharCount)) : '')
-      : normalizeText(container.innerText || container.textContent || '');
-
-    if (!isHiddenByPulse && !text) continue;
-
     messages.push({
       node: container,
       seq: Number(container.dataset.gptpulseSeq),
-      charCount: isHiddenByPulse
-        ? Number(container.dataset.gptpulseCharCount || 0)
-        : text.length,
-      isHiddenByPulse
+      charCount: text.length
     });
   }
 
@@ -237,38 +279,86 @@ function collectMessages(state) {
   return messages;
 }
 
-async function hideMessage(chatId, message) {
-  await putSnapshot(chatId, message.seq, {
-    html: message.node.innerHTML
-  });
+function renderArchiveSummary(hiddenCount) {
+  removeArchiveSummary();
+
+  if (!hiddenCount) return;
+
+  const firstVisible = collectVisibleMessageNodes()[0] || null;
+  const parent = firstVisible?.parentNode || findThreadParent();
+  if (!parent) return;
+
+  const summary = document.createElement('div');
+  summary.id = ARCHIVE_SUMMARY_ID;
+  summary.innerHTML = `<strong>${formatNumber(hiddenCount)}</strong> older messages are currently hidden. Increase the visible message limit to bring more back into the chat.`;
 
   withDomChanges(() => {
-    message.node.dataset.gptpulseHidden = '1';
-    message.node.dataset.gptpulseCharCount = String(message.charCount);
-    message.node.dataset.gptpulsePrevDisplay = message.node.style.display || '';
-    message.node.innerHTML = '<div class="gptpulse-hidden-stub" aria-hidden="true"></div>';
-    message.node.style.display = 'none';
+    parent.insertBefore(summary, firstVisible);
   });
 }
 
-async function restoreMessage(chatId, message) {
-  const snapshot = await getSnapshot(chatId, message.seq);
-  if (!snapshot?.html) return;
+function removeArchiveSummary() {
+  const node = document.getElementById(ARCHIVE_SUMMARY_ID);
+  if (!node) return;
 
   withDomChanges(() => {
-    message.node.innerHTML = snapshot.html;
-
-    const prevDisplay = message.node.dataset.gptpulsePrevDisplay || '';
-    if (prevDisplay) {
-      message.node.style.display = prevDisplay;
-    } else {
-      message.node.style.removeProperty('display');
-    }
-
-    delete message.node.dataset.gptpulseHidden;
-    delete message.node.dataset.gptpulseCharCount;
-    delete message.node.dataset.gptpulsePrevDisplay;
+    node.remove();
   });
+}
+
+function findThreadParent() {
+  const firstVisible = collectVisibleMessageNodes()[0];
+  if (firstVisible?.parentNode) return firstVisible.parentNode;
+
+  const main = document.querySelector('main');
+  return main || null;
+}
+
+function withDomChanges(fn) {
+  suppressObserver = true;
+  try {
+    fn();
+  } finally {
+    requestAnimationFrame(() => {
+      suppressObserver = false;
+    });
+  }
+}
+
+function normalizeText(text) {
+  return String(text)
+    .replace(/\u00A0/g, ' ')
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+function getChatId() {
+  const match = location.pathname.match(/\/c\/([^/?#]+)/);
+  if (match?.[1]) return match[1];
+  return location.pathname || 'temporary-chat';
+}
+
+function sumChars(items) {
+  return items.reduce((sum, item) => sum + (item.charCount || 0), 0);
+}
+
+function formatCompact(num) {
+  if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
+  if (num >= 1000) return `${(num / 1000).toFixed(1)}k`;
+  return String(num);
+}
+
+function formatNumber(num) {
+  return new Intl.NumberFormat().format(Number(num) || 0);
+}
+
+function clampInt(value, min, max, fallback) {
+  const n = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 function renderOverlay({ totalCount, visibleCount, hiddenCount, totalChars }) {
@@ -322,51 +412,13 @@ function renderOverlay({ totalCount, visibleCount, hiddenCount, totalChars }) {
   });
 }
 
-function withDomChanges(fn) {
-  suppressObserver = true;
-  try {
-    fn();
-  } finally {
-    requestAnimationFrame(() => {
-      suppressObserver = false;
-    });
-  }
-}
-
-function normalizeText(text) {
-  return String(text)
-    .replace(/\u00A0/g, ' ')
-    .replace(/\r/g, '')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/[ \t]{2,}/g, ' ')
-    .trim();
-}
-
-function getChatId() {
-  const match = location.pathname.match(/\/c\/([^/?#]+)/);
-  if (match?.[1]) return match[1];
-  return location.pathname || 'temporary-chat';
-}
-
-function sumChars(items) {
-  return items.reduce((sum, item) => sum + (item.charCount || 0), 0);
-}
-
-function formatCompact(num) {
-  if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
-  if (num >= 1000) return `${(num / 1000).toFixed(1)}k`;
-  return String(num);
-}
-
-function formatNumber(num) {
-  return new Intl.NumberFormat().format(Number(num) || 0);
-}
-
-function clampInt(value, min, max, fallback) {
-  const n = Number.parseInt(String(value), 10);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.min(max, Math.max(min, n));
+function defaultMeta(chatId) {
+  return {
+    chatId,
+    count: 0,
+    totalChars: 0,
+    lastSeq: 0
+  };
 }
 
 function openDb() {
@@ -377,8 +429,13 @@ function openDb() {
 
     request.onupgradeneeded = () => {
       const db = request.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: ['chatId', 'seq'] });
+
+      if (!db.objectStoreNames.contains(META_STORE)) {
+        db.createObjectStore(META_STORE, { keyPath: 'chatId' });
+      }
+
+      if (!db.objectStoreNames.contains(SNAPSHOT_STORE)) {
+        db.createObjectStore(SNAPSHOT_STORE, { keyPath: ['chatId', 'seq'] });
       }
     };
 
@@ -389,14 +446,18 @@ function openDb() {
   return dbPromise;
 }
 
-async function clearChatSnapshots(chatId) {
+async function clearChatArchive(chatId) {
   const db = await openDb();
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
+    const tx = db.transaction([META_STORE, SNAPSHOT_STORE], 'readwrite');
+    const metaStore = tx.objectStore(META_STORE);
+    const snapshotStore = tx.objectStore(SNAPSHOT_STORE);
+
+    metaStore.delete(chatId);
+
     const range = IDBKeyRange.bound([chatId, 0], [chatId, Number.MAX_SAFE_INTEGER]);
-    const request = store.openCursor(range);
+    const request = snapshotStore.openCursor(range);
 
     request.onsuccess = () => {
       const cursor = request.result;
@@ -412,34 +473,105 @@ async function clearChatSnapshots(chatId) {
   });
 }
 
-async function putSnapshot(chatId, seq, value) {
+async function getChatMeta(chatId) {
   const db = await openDb();
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
+    const tx = db.transaction(META_STORE, 'readonly');
+    const store = tx.objectStore(META_STORE);
+    const request = store.get(chatId);
 
-    store.put({
-      chatId,
-      seq,
-      ...value
-    });
+    request.onsuccess = () => resolve(request.result || defaultMeta(chatId));
+    request.onerror = () => reject(request.error);
+  });
+}
 
+async function appendSnapshots(chatId, snapshots) {
+  if (!snapshots.length) return;
+
+  const db = await openDb();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([META_STORE, SNAPSHOT_STORE], 'readwrite');
+    const metaStore = tx.objectStore(META_STORE);
+    const snapshotStore = tx.objectStore(SNAPSHOT_STORE);
+    const metaRequest = metaStore.get(chatId);
+
+    metaRequest.onsuccess = () => {
+      const meta = metaRequest.result || defaultMeta(chatId);
+
+      for (const snapshot of snapshots) {
+        meta.count += 1;
+        meta.totalChars += snapshot.charCount || 0;
+        if (snapshot.seq > meta.lastSeq) meta.lastSeq = snapshot.seq;
+
+        snapshotStore.put({
+          chatId,
+          seq: snapshot.seq,
+          outerHTML: snapshot.outerHTML,
+          charCount: snapshot.charCount || 0
+        });
+      }
+
+      metaStore.put(meta);
+    };
+
+    metaRequest.onerror = () => reject(metaRequest.error);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);
   });
 }
 
-async function getSnapshot(chatId, seq) {
+async function takeNewestSnapshots(chatId, limit) {
+  if (limit <= 0) return [];
+
   const db = await openDb();
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const store = tx.objectStore(STORE_NAME);
-    const request = store.get([chatId, seq]);
+    const tx = db.transaction([META_STORE, SNAPSHOT_STORE], 'readwrite');
+    const metaStore = tx.objectStore(META_STORE);
+    const snapshotStore = tx.objectStore(SNAPSHOT_STORE);
+    const metaRequest = metaStore.get(chatId);
+    const collected = [];
 
-    request.onsuccess = () => resolve(request.result || null);
-    request.onerror = () => reject(request.error);
+    metaRequest.onsuccess = () => {
+      const meta = metaRequest.result || defaultMeta(chatId);
+      const range = IDBKeyRange.bound([chatId, 0], [chatId, Number.MAX_SAFE_INTEGER]);
+      const cursorRequest = snapshotStore.openCursor(range, 'prev');
+
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+
+        if (!cursor || collected.length >= limit) {
+          for (const item of collected) {
+            snapshotStore.delete([chatId, item.seq]);
+            meta.count -= 1;
+            meta.totalChars -= item.charCount || 0;
+          }
+
+          if (meta.count < 0) meta.count = 0;
+          if (meta.totalChars < 0) meta.totalChars = 0;
+
+          metaStore.put(meta);
+          return;
+        }
+
+        collected.push(cursor.value);
+        cursor.continue();
+      };
+
+      cursorRequest.onerror = () => reject(cursorRequest.error);
+    };
+
+    metaRequest.onerror = () => reject(metaRequest.error);
+
+    tx.oncomplete = () => {
+      collected.reverse();
+      resolve(collected);
+    };
+
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
   });
 }
