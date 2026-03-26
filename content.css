@@ -84,3 +84,58 @@ html.gptpulse-trim-pending main {
   margin: 0;
   accent-color: #ffffff;
 }
+
+#gptpulse-archive-block {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+.gptpulse-archive-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: rgba(255,255,255,0.03);
+  color: rgba(255,255,255,0.86);
+  font-size: 12px;
+}
+
+.gptpulse-archive-summary strong {
+  color: #fff;
+}
+
+.gptpulse-archive-list {
+  display: grid;
+  gap: 8px;
+}
+
+.gptpulse-archive-item {
+  border: 1px solid rgba(255,255,255,0.06);
+  background: rgba(255,255,255,0.025);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+.gptpulse-archive-role {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  color: rgba(255,255,255,0.86);
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.gptpulse-archive-text {
+  color: rgba(255,255,255,0.86);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

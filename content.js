@@ -1,4 +1,10 @@
 const ROOT_ID = 'gptpulse-root';
+const ARCHIVE_BLOCK_ID = 'gptpulse-archive-block';
+const DB_NAME = 'gptpulse-archive';
+const DB_VERSION = 1;
+const META_STORE = 'chatMeta';
+const MESSAGE_STORE = 'chatMessages';
+const LIVE_DOM_CAP = 12;
 
 const DEFAULTS = {
   overlayVisible: true,
@@ -11,7 +17,9 @@ let observer = null;
 let updateTimer = null;
 let suppressObserver = false;
 let pendingRevealTimer = null;
+let latestRunToken = 0;
 let currentState = makeChatState(getChatId());
+let dbPromise = null;
 
 bootstrap().catch((error) => {
   console.error('[GPTPulse][content] bootstrap failed', error);
@@ -26,12 +34,6 @@ async function bootstrap() {
   settings = { ...DEFAULTS, ...stored };
 
   ensureRoot();
-  render({
-    totalCount: 0,
-    shownCount: 0,
-    hiddenCount: 0,
-    totalChars: 0
-  });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
@@ -62,6 +64,13 @@ async function bootstrap() {
     if (!document.hidden) scheduleUpdate(0);
   });
 
+  renderOverlay({
+    totalCount: 0,
+    shownCount: 0,
+    hiddenCount: 0,
+    totalChars: 0
+  });
+
   scheduleUpdate(0);
 }
 
@@ -69,29 +78,21 @@ function patchHistory() {
   if (window.__gptpulseHistoryPatched) return;
   window.__gptpulseHistoryPatched = true;
 
-  const wrap = (name) => {
+  for (const name of ['pushState', 'replaceState']) {
     const original = history[name];
-    if (typeof original !== 'function') return;
+    if (typeof original !== 'function') continue;
 
     history[name] = function (...args) {
       const result = original.apply(this, args);
       window.dispatchEvent(new Event('gptpulse:navigation'));
       return result;
     };
-  };
-
-  wrap('pushState');
-  wrap('replaceState');
+  }
 }
 
 function handleNavigation() {
-  const chatId = getChatId();
-  if (!currentState || currentState.chatId !== chatId) {
-    currentState = makeChatState(chatId);
-  } else {
-    currentState.stashed = [];
-  }
-
+  currentState = makeChatState(getChatId());
+  removeArchiveBlock();
   markTrimPending();
   scheduleUpdate(0);
 }
@@ -99,7 +100,7 @@ function handleNavigation() {
 function makeChatState(chatId) {
   return {
     chatId,
-    stashed: []
+    prepPromise: clearChatArchive(chatId)
   };
 }
 
@@ -109,6 +110,18 @@ function ensureCurrentState() {
     currentState = makeChatState(chatId);
   }
   return currentState;
+}
+
+function ensureRoot() {
+  let existing = document.getElementById(ROOT_ID);
+  if (existing) {
+    root = existing;
+    return;
+  }
+
+  root = document.createElement('div');
+  root.id = ROOT_ID;
+  document.documentElement.appendChild(root);
 }
 
 function markTrimPending() {
@@ -125,139 +138,85 @@ function markTrimReady() {
   document.documentElement.classList.remove('gptpulse-trim-pending');
 }
 
-function ensureRoot() {
-  let existing = document.getElementById(ROOT_ID);
-  if (existing) {
-    root = existing;
-    return;
-  }
-
-  root = document.createElement('div');
-  root.id = ROOT_ID;
-  document.documentElement.appendChild(root);
-}
-
 function scheduleUpdate(delay = 80) {
   clearTimeout(updateTimer);
-  updateTimer = setTimeout(runUpdate, delay);
+  const token = ++latestRunToken;
+  updateTimer = setTimeout(() => {
+    void runUpdate(token);
+  }, delay);
 }
 
-async function runUpdate() {
+async function runUpdate(token) {
   ensureRoot();
   const state = ensureCurrentState();
 
-  if (!settings.overlayVisible) {
-    restoreAllStashed(state);
+  try {
+    await state.prepPromise;
+  } catch (error) {
+    console.warn('[GPTPulse] archive clear failed', error);
+  }
+
+  if (token !== latestRunToken) return;
+
+  if (settings.overlayVisible) {
+    root.style.display = '';
+  } else {
     root.style.display = 'none';
-    markTrimReady();
-    return;
   }
 
-  root.style.display = '';
+  const visibleTarget = clampInt(settings.maxVisibleMessages, 1, 200, 10);
+  const liveTarget = Math.min(visibleTarget, LIVE_DOM_CAP);
 
-  const limit = clampInt(settings.maxVisibleMessages, 1, 200, 10);
-  const visibleBefore = collectVisibleMessages();
+  let realMessages = collectRealMessages();
 
-  if (visibleBefore.length === 0) {
-    render({
-      totalCount: state.stashed.length,
-      shownCount: 0,
-      hiddenCount: state.stashed.length,
-      totalChars: sumChars(state.stashed)
-    });
-    return;
+  if (realMessages.length > liveTarget) {
+    markTrimPending();
+    const overflow = realMessages.slice(0, realMessages.length - liveTarget);
+    await archiveAndRemoveMessages(state.chatId, overflow);
+    if (token !== latestRunToken) return;
+    realMessages = collectRealMessages();
   }
 
-  applyWindowing(state, visibleBefore, limit);
+  const meta = await getChatMeta(state.chatId);
+  if (token !== latestRunToken) return;
 
-  const visibleAfter = collectVisibleMessages();
-  const totalChars = sumChars(visibleAfter) + sumChars(state.stashed);
+  const archiveVisibleTarget = Math.max(0, visibleTarget - realMessages.length);
+  const archiveVisibleEntries = archiveVisibleTarget > 0
+    ? await getTailArchivedMessages(state.chatId, archiveVisibleTarget)
+    : [];
 
-  render({
-    totalCount: visibleAfter.length + state.stashed.length,
-    shownCount: visibleAfter.length,
-    hiddenCount: state.stashed.length,
-    totalChars
+  if (token !== latestRunToken) return;
+
+  renderArchiveBlock(archiveVisibleEntries, meta.count);
+  renderOverlay({
+    totalCount: realMessages.length + meta.count,
+    shownCount: realMessages.length + archiveVisibleEntries.length,
+    hiddenCount: Math.max(0, meta.count - archiveVisibleEntries.length),
+    totalChars: sumChars(realMessages) + (meta.totalChars || 0)
   });
 
   markTrimReady();
 }
 
-function applyWindowing(state, visibleMessages, limit) {
-  if (visibleMessages.length > limit) {
-    const collapseCount = visibleMessages.length - limit;
-    const toCollapse = visibleMessages.slice(0, collapseCount);
+async function archiveAndRemoveMessages(chatId, messages) {
+  if (!messages.length) return;
 
-    withDomChanges(() => {
-      for (const message of toCollapse) {
-        state.stashed.push(snapshotMessage(message));
-        message.node.remove();
-      }
-    });
+  const snapshots = messages.map((message) => ({
+    role: message.role,
+    text: message.text,
+    charCount: message.charCount
+  }));
 
-    return;
-  }
-
-  if (visibleMessages.length < limit && state.stashed.length > 0) {
-    const restoreCount = Math.min(limit - visibleMessages.length, state.stashed.length);
-    const toRestore = state.stashed.splice(state.stashed.length - restoreCount, restoreCount);
-    restoreSnapshots(toRestore);
-  }
-}
-
-function restoreAllStashed(state) {
-  if (!state.stashed.length) return;
-  const toRestore = state.stashed.splice(0, state.stashed.length);
-  restoreSnapshots(toRestore);
-}
-
-function restoreSnapshots(entries) {
-  if (!entries.length) return;
-
-  const visibleMessages = collectVisibleMessages();
-  const referenceNode = visibleMessages[0]?.node || null;
-  const parent = referenceNode?.parentNode || findMessageParent();
-
-  if (!parent) return;
+  await appendArchivedMessages(chatId, snapshots);
 
   withDomChanges(() => {
-    const range = document.createRange();
-    range.selectNode(parent);
-
-    for (const entry of entries) {
-      const fragment = range.createContextualFragment(entry.html);
-      parent.insertBefore(fragment, referenceNode);
+    for (const message of messages) {
+      message.node.remove();
     }
   });
 }
 
-function snapshotMessage(message) {
-  return {
-    html: message.node.outerHTML,
-    charCount: message.charCount
-  };
-}
-
-function findMessageParent() {
-  const firstVisible = collectVisibleMessages()[0]?.node;
-  if (firstVisible?.parentNode) return firstVisible.parentNode;
-
-  const main = document.querySelector('main');
-  return main || null;
-}
-
-function withDomChanges(fn) {
-  suppressObserver = true;
-  try {
-    fn();
-  } finally {
-    requestAnimationFrame(() => {
-      suppressObserver = false;
-    });
-  }
-}
-
-function render({ totalCount, shownCount, hiddenCount, totalChars }) {
+function renderOverlay({ totalCount, shownCount, hiddenCount, totalChars }) {
   const sliderValue = clampInt(settings.maxVisibleMessages, 1, 200, 10);
 
   root.innerHTML = `
@@ -304,7 +263,62 @@ function render({ totalCount, shownCount, hiddenCount, totalChars }) {
   });
 }
 
-function collectVisibleMessages() {
+function renderArchiveBlock(entries, totalArchivedCount) {
+  removeArchiveBlock();
+
+  if (!entries.length) return;
+
+  const firstReal = collectRealMessages()[0]?.node || null;
+  const parent = firstReal?.parentNode || findThreadParent();
+  if (!parent) return;
+
+  const block = document.createElement('div');
+  block.id = ARCHIVE_BLOCK_ID;
+  block.setAttribute('data-gptpulse-archive-block', '1');
+
+  const hiddenCount = Math.max(0, totalArchivedCount - entries.length);
+
+  block.innerHTML = `
+    <div class="gptpulse-archive-summary">
+      <span><strong>${formatNumber(entries.length)}</strong> archived messages rendered in lightweight mode</span>
+      <span>${formatNumber(hiddenCount)} still collapsed</span>
+    </div>
+    <div class="gptpulse-archive-list">
+      ${entries.map(renderArchiveItem).join('')}
+    </div>
+  `;
+
+  withDomChanges(() => {
+    parent.insertBefore(block, firstReal);
+  });
+}
+
+function renderArchiveItem(entry) {
+  return `
+    <div class="gptpulse-archive-item">
+      <div class="gptpulse-archive-role">${escapeHtml(formatRole(entry.role))}</div>
+      <div class="gptpulse-archive-text">${escapeHtml(entry.text)}</div>
+    </div>
+  `;
+}
+
+function formatRole(role) {
+  if (role === 'user') return 'You';
+  if (role === 'assistant') return 'Assistant';
+  if (role === 'system') return 'System';
+  return role || 'Message';
+}
+
+function removeArchiveBlock() {
+  const existing = document.getElementById(ARCHIVE_BLOCK_ID);
+  if (existing) {
+    withDomChanges(() => {
+      existing.remove();
+    });
+  }
+}
+
+function collectRealMessages() {
   const candidates = Array.from(document.querySelectorAll('main [data-message-author-role], [data-message-author-role]'));
   const seenContainers = new Set();
   const messages = [];
@@ -312,24 +326,53 @@ function collectVisibleMessages() {
   for (const node of candidates) {
     if (!(node instanceof HTMLElement)) continue;
     if (root && (node === root || root.contains(node))) continue;
+    if (node.closest('[data-gptpulse-archive-block="1"]')) continue;
 
     const container = node.closest('article') || node;
     if (!(container instanceof HTMLElement)) continue;
     if (!container.isConnected) continue;
     if (root && (container === root || root.contains(container))) continue;
+    if (container.closest('[data-gptpulse-archive-block="1"]')) continue;
     if (seenContainers.has(container)) continue;
 
     const text = normalizeText(container.innerText || container.textContent || '');
     if (!text) continue;
 
     seenContainers.add(container);
+
     messages.push({
       node: container,
+      role: extractRole(container),
+      text,
       charCount: text.length
     });
   }
 
   return messages;
+}
+
+function extractRole(container) {
+  const roleNode = container.querySelector('[data-message-author-role]');
+  return roleNode?.getAttribute('data-message-author-role') || 'message';
+}
+
+function findThreadParent() {
+  const firstReal = collectRealMessages()[0]?.node;
+  if (firstReal?.parentNode) return firstReal.parentNode;
+
+  const main = document.querySelector('main');
+  return main || null;
+}
+
+function withDomChanges(fn) {
+  suppressObserver = true;
+  try {
+    fn();
+  } finally {
+    requestAnimationFrame(() => {
+      suppressObserver = false;
+    });
+  }
 }
 
 function normalizeText(text) {
@@ -366,4 +409,157 @@ function clampInt(value, min, max, fallback) {
   const n = Number.parseInt(String(value), 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, n));
+}
+
+function escapeHtml(input) {
+  return String(input)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function openDb() {
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+
+      if (!db.objectStoreNames.contains(META_STORE)) {
+        db.createObjectStore(META_STORE, { keyPath: 'chatId' });
+      }
+
+      if (!db.objectStoreNames.contains(MESSAGE_STORE)) {
+        db.createObjectStore(MESSAGE_STORE, { keyPath: ['chatId', 'seq'] });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  return dbPromise;
+}
+
+async function clearChatArchive(chatId) {
+  const db = await openDb();
+
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction([META_STORE, MESSAGE_STORE], 'readwrite');
+    const metaStore = tx.objectStore(META_STORE);
+    const messageStore = tx.objectStore(MESSAGE_STORE);
+
+    metaStore.delete(chatId);
+
+    const range = IDBKeyRange.bound([chatId, 0], [chatId, Number.MAX_SAFE_INTEGER]);
+    const cursorRequest = messageStore.openCursor(range);
+
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) return;
+      cursor.delete();
+      cursor.continue();
+    };
+
+    cursorRequest.onerror = () => reject(cursorRequest.error);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+async function getChatMeta(chatId) {
+  const db = await openDb();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, 'readonly');
+    const store = tx.objectStore(META_STORE);
+    const request = store.get(chatId);
+
+    request.onsuccess = () => {
+      resolve(request.result || {
+        chatId,
+        count: 0,
+        totalChars: 0,
+        lastSeq: 0
+      });
+    };
+
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function appendArchivedMessages(chatId, snapshots) {
+  if (!snapshots.length) return;
+
+  const db = await openDb();
+
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction([META_STORE, MESSAGE_STORE], 'readwrite');
+    const metaStore = tx.objectStore(META_STORE);
+    const messageStore = tx.objectStore(MESSAGE_STORE);
+    const metaRequest = metaStore.get(chatId);
+
+    metaRequest.onsuccess = () => {
+      const meta = metaRequest.result || {
+        chatId,
+        count: 0,
+        totalChars: 0,
+        lastSeq: 0
+      };
+
+      for (const snapshot of snapshots) {
+        meta.lastSeq += 1;
+        meta.count += 1;
+        meta.totalChars += snapshot.charCount || 0;
+
+        messageStore.put({
+          chatId,
+          seq: meta.lastSeq,
+          role: snapshot.role,
+          text: snapshot.text,
+          charCount: snapshot.charCount || 0
+        });
+      }
+
+      metaStore.put(meta);
+    };
+
+    metaRequest.onerror = () => reject(metaRequest.error);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+async function getTailArchivedMessages(chatId, limit) {
+  if (limit <= 0) return [];
+
+  const db = await openDb();
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(MESSAGE_STORE, 'readonly');
+    const store = tx.objectStore(MESSAGE_STORE);
+    const range = IDBKeyRange.bound([chatId, 0], [chatId, Number.MAX_SAFE_INTEGER]);
+    const request = store.openCursor(range, 'prev');
+    const result = [];
+
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor || result.length >= limit) {
+        result.reverse();
+        resolve(result);
+        return;
+      }
+
+      result.push(cursor.value);
+      cursor.continue();
+    };
+
+    request.onerror = () => reject(request.error);
+  });
 }
