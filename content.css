@@ -14,8 +14,8 @@ html.gptpulse-trim-pending main {
 
 .gptpulse-card {
   width: max-content;
-  min-width: 224px;
-  max-width: 248px;
+  min-width: 220px;
+  max-width: 246px;
   border: 1px solid rgba(255,255,255,0.12);
   background: rgba(20, 20, 24, 0.92);
   backdrop-filter: blur(12px);
@@ -83,19 +83,4 @@ html.gptpulse-trim-pending main {
   width: 100%;
   margin: 0;
   accent-color: #ffffff;
-}
-
-#gptpulse-archive-summary {
-  margin: 0 0 16px;
-  padding: 10px 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.03);
-  color: rgba(255,255,255,0.82);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-#gptpulse-archive-summary strong {
-  color: #fff;
 }
