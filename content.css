@@ -85,17 +85,11 @@ html.gptpulse-trim-pending main {
   accent-color: #ffffff;
 }
 
-#gptpulse-archive-summary {
-  margin: 0 0 16px;
-  padding: 10px 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(255,255,255,0.08);
-  background: rgba(255,255,255,0.03);
-  color: rgba(255,255,255,0.82);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-#gptpulse-archive-summary strong {
-  color: #fff;
+.gptpulse-hidden-stub {
+  display: block;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
